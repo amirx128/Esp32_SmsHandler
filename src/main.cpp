@@ -131,7 +131,8 @@ void CheckSensorsTask(void *param)
   }
 }
 
-bool isAuthorizedNumber(String num){
+bool isAuthorizedNumber(String num)
+{
   for (int i = 0; i < allowedCount; i++)
   {
     if (allowedNumbers[i] == num)
@@ -142,7 +143,8 @@ bool isAuthorizedNumber(String num){
   return false;
 }
 
-bool PirIsTrige(PirSensor &sensor){
+bool PirIsTrige(PirSensor &sensor)
+{
   unsigned long now = millis();
   int pirState = digitalRead(sensor.pin);
 
@@ -176,8 +178,45 @@ bool PirIsTrige(PirSensor &sensor){
   return false;
 }
 
+bool isGpsOn()
+{
+  SIM808.println("AT+CGNSPWR?");
+  unsigned long start = millis();
+  String resp = "";
+  while (millis() - start < 1000)
+  {
+    while (SIM808.available())
+    {
+      char c = SIM808.read();
+      resp += c;
+    }
+  }
+  resp.trim();
+  // اگر مقدار بعد از +CGNSPWR: 1 بود یعنی روشن است
+  int idx = resp.indexOf("+CGNSPWR:");
+  if (idx != -1)
+  {
+    String val = resp.substring(idx + 9); // بعد از +CGNSPWR:
+    val.trim();
+    if (val.startsWith("1"))
+    {
+      Serial.println("gps power on success... resp : " + resp + "-------  idx  " + idx);
+      return true;
+    }
+  }
+  Serial.println("gps power on failed... resp : " + resp + "-------  idx  " + idx);
+
+  return false;
+}
+
 bool getGpsLocation()
 {
+  if (!isGpsOn())
+  {
+    SIM808.println("AT+CGNSPWR=1");
+    delay(1000); // اجازه بده روشن شود
+  }
+
   Serial.println("getGpsLocation()");
   SIM808.println("AT+CGNSINF");
   delay(150); // اجازه برای پاسخ

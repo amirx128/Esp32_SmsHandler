@@ -7,18 +7,17 @@ const int SIM808_TX = 17;
 const int AllarmLedPin = 2;
 const int AllarmBuzzerPin = 2;
 int systemStatus = 1; // 1=>arm , 2 disarm , 3 halfArm
+int smsStatus = 1;    // 1=>send , 0=> not send
 String latitude = "";
 String longitude = "";
 String adminMobileNumber = "+989368054055";
-String allowedNumbers[] = {
-    "+989121234567",
-    "+989368054055", adminMobileNumber};
+String allowedNumbers[] = {adminMobileNumber, "+989121234567"};
 bool simIsOnline = false;
 const int allowedCount = sizeof(allowedNumbers) / sizeof(allowedNumbers[0]);
 String smsBuffer = "";
 unsigned long lastSmsCheck = 0;
 const unsigned long smsTimeout = 3000;           // زمان بررسی پیامک‌ها
-const unsigned long PIR_DETECTION_WINDOW = 1000; // بازه‌ی ۱ ثانیه
+const unsigned long PIR_DETECTION_WINDOW = 2000; // بازه‌ی ۱ ثانیه
 const int PIR_REQUIRED_COUNT = 3;                // تعداد تحریک لازم در بازه
 const int PIR_LOOP_DELAY = 100;                  // صبر در انتهای هر دور (میلی‌ثانیه)
 struct PirSensor
@@ -35,7 +34,8 @@ struct PirSensor
 };
 
 PirSensor sensors[] = {
-    PirSensor(22, "single pir "),
+    PirSensor(21, "sensor amoodi "),
+    PirSensor(22, "sensor ofoghi "),
     PirSensor(23, "box pir")};
 const int sensorCount = sizeof(sensors) / sizeof(sensors[0]);
 #pragma endregion
@@ -74,24 +74,46 @@ void Allarm(int blinkCountPerLoop, int blinkDelayMs, int loopCount, int loopPaus
   }
 }
 
+void SmsTask(void *param)
+{
+  PirSensor *temp = (PirSensor *)param;
+
+  Serial.println("📩 SMS Task started");
+
+  for (int i = 0; i < allowedCount; i++)
+  {
+    if (allowedNumbers[i].length() == 0)
+      continue; // اگر شماره خالی است
+
+    for (int j = 0; j < sensorCount; j++)
+    {
+      if (temp[j].motionDetected)
+      {
+        Serial.printf("📩 Sending SMS to %s about sensor %s\n",
+                      allowedNumbers[i].c_str(), temp[j].name.c_str());
+        sendSms(allowedNumbers[i], temp[j].name);
+      }
+    }
+  }
+
+  Serial.println("✅ All SMS sent. Deleting task...");
+  free(temp);
+  vTaskDelete(NULL);
+}
+
 void AlarmTask(void *param)
 {
-  // پارامتر ورودی رو بازیابی می‌کنیم
   int *args = (int *)param;
   int blinkCountPerLoop = args[0];
   int blinkDelayMs = args[1];
   int loopCount = args[2];
   int loopPauseMs = args[3];
-  free(args); // حافظه آزاد شود
-
-  Serial.println("🚨 Alarm started!");
+  free(args);
 
   Allarm(blinkCountPerLoop, blinkDelayMs, loopCount, loopPauseMs);
 
-  Serial.println("✅ Alarm finished. Resetting flag...");
   alarmTriggered = false;
-
-  vTaskDelete(NULL); // حذف Task
+  vTaskDelete(NULL);
 }
 
 void CheckSensorsTask(void *param)
@@ -125,6 +147,34 @@ void CheckSensorsTask(void *param)
       args[3] = 1000; // loopPauseMs
 
       xTaskCreate(AlarmTask, "AlarmTask", 4096, args, 1, NULL);
+
+      #pragma region  sms
+      PirSensor *temp = (PirSensor *)malloc(sizeof(PirSensor) * sensorCount);
+      if (temp == NULL)
+      {
+        Serial.println("❌ Failed to allocate memory for sensors!");
+        vTaskDelete(NULL);
+        return;
+      }
+
+      for (int i = 0; i < sensorCount; i++)
+      {
+        temp[i] = sensors[i];
+      }
+
+      Serial.println("🚨 Alarm started!");
+
+      BaseType_t result = xTaskCreate(
+          SmsTask, "SmsTask", 4096, temp, 1, NULL);
+
+      if (result != pdPASS)
+      {
+        Serial.println("❌ Failed to create SMS Task!");
+        free(temp);
+      }
+
+      #pragma endregion
+    
     }
 
     vTaskDelay(100 / portTICK_PERIOD_MS); // هر 100 میلی‌ثانیه چک کنه
@@ -233,11 +283,13 @@ bool getGpsLocation()
       fullResp += c;
     }
   }
+  Serial.println("fullResp>>>>    " + fullResp);
 
   int p = fullResp.indexOf("+CGNSINF:");
   if (p == -1)
     return false;
 
+  Serial.println("getGpsLocation1>>>>    " + p);
   // payload بعد از :
   int col = fullResp.indexOf(':', p);
   if (col == -1)
@@ -323,6 +375,9 @@ void SetupSim()
 
 String sendSms(String number, String msg)
 {
+  if (smsStatus == 0)
+    return "false";
+
   if (!simIsOnline)
   {
     SetupSim();
@@ -426,6 +481,18 @@ void compileSms(String smsText, String num)
     systemStatus = 1;
     sendSms(num, "system is arm");
     sendSms(adminMobileNumber, "system is arm for user : " + num);
+  }
+  else if (smsText == "smson")
+  {
+    smsStatus = 1;
+    sendSms(num, "system sms is on");
+    sendSms(adminMobileNumber, "system sms is on ,  user : " + num);
+  }
+  else if (smsText == "smsoff")
+  {
+    smsStatus = 0;
+    sendSms(num, "system sms is off");
+    sendSms(adminMobileNumber, "system sms is off ,  user : " + num);
   }
   else
   {

@@ -1,0 +1,490 @@
+// #include <AsyncJson.h>
+// #include <Arduino.h>
+// #include <WiFi.h>
+// #include <ESPAsyncWebServer.h>
+// #include <Preferences.h>
+// #include <ArduinoJson.h>
+
+// // تنظیمات وای‌فای
+// const char *ssid = "YOUR_SSID";
+// const char *password = "YOUR_PASS";
+
+// // سرور
+// AsyncWebServer server(80);
+// Preferences prefs;
+
+// // --- امنیت ---
+// String username = "admin";
+// String userPassword = "1234";
+
+// // --- ساختار کلید ---
+// struct ConfigKey
+// {
+//   String key;
+//   String type; // string, int, bool, dropdown, mobile
+//   String defaultVal;
+//   String min;
+//   String max;
+//   String options; // برای dropdown: "on,off"
+//   bool isSystem;
+  
+// };
+
+// // کلیدهای پیش‌فرض
+// ConfigKey defaultKeys[] = {
+//     {"systemStatus", "dropdown", "on", "", "", "on,off" , false},
+//     // {"wifiTimeout", "int", "30", "10", "300", "", false},
+//     {"deviceName", "string", "دزدگیر", "3", "20", "", false},
+//     {"alertEnabled", "bool", "true", "", "", "true,false", false},
+//     {"deviceownermobile", "mobile", "", "10", "10", "", false},
+//     {"alternetMobile", "mobile", "", "10", "10", "", false},
+//     {"alternetMobiles", "string", "", "10", "100", "", false},
+//     {"theme", "dropdown", "dark", "", "", "light,dark,oled", false}};
+
+// const int numKeys = sizeof(defaultKeys) / sizeof(defaultKeys[0]);
+
+// #pragma region Html
+// // --- HTML ---
+// const char index_html[] PROGMEM = R"rawliteral(
+// <!DOCTYPE html>
+// <html lang="fa" dir="rtl">
+// <head>
+//   <meta charset="UTF-8" />
+//   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+//   <title>تنظیمات دستگاه </title>
+//   <style>
+//     :root { --p: #3498db; --d: #e74c3c; --s: #2ecc71; --bg: #1a1a1a; --card: #2d2d2d; --text: #eee; }
+//     body { font-family: Tahoma; background: var(--bg); color: var(--text); margin:0; }
+//     .container { max-width: 900px; margin: 20px auto; padding: 20px; }
+//     .card { background: var(--card); border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+//     h1, h2 { text-align: center; color: var(--p); }
+//     input, select, button { padding: 10px; margin: 5px 0; border-radius: 8px; width: 100%; border: 1px solid #555; background: rgba(255,255,255,0.1); color: var(--text); }
+//     button { background: var(--p); color: white; border: none; cursor: pointer; font-weight: bold; }
+//     .btn-d { background: var(--d); }
+//     .btn-s { background: var(--s); }
+//     .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 15px; }
+//     .key-card { border: 1px solid #444; border-radius: 8px; padding: 15px; }
+//     .system { border-left: 5px solid var(--p); }
+//     .hidden { display: none; }
+//     .error { color: var(--d); font-size: 0.9em; }
+//     .mobile-input { direction: ltr; text-align: left; font-family: monospace; }
+//   </style>
+// </head>
+// <body>
+
+//   <!-- صفحه ورود -->
+//   <div id="login" class="container">
+//     <div class="card" style="max-width:400px;margin:auto;">
+//       <h2>ورود به سیستم</h2>
+//       <input type="text" id="user" placeholder="نام کاربری" />
+//       <input type="password" id="pass" placeholder="رمز عبور" />
+//       <button type="button" onclick="login()">ورود</button>
+//       <p class="error" id="err"></p>
+//     </div>
+//   </div>
+
+//   <!-- صفحه اصلی -->
+//   <div id="main" class="container hidden">
+//     <div class="card">
+//       <h1>مدیریت تنظیمات</h1>
+      
+//       <button class="btn-s" onclick="changePass()">تغییر رمز</button>
+//       <button onclick="logout()">خروج</button> 
+//     </div>
+//     <div id="grid" class="grid"></div>
+
+//     <div class="card"> 
+      
+//       <button class="btn-d" onclick="factoryReset()">ریست فکتوری</button>
+//       <button class="btn-d" onclick="ResetEsp()">راه اندازی مجدد </button>
+
+//     </div>
+//   </div>
+
+//   <!-- اسکریپت بعد از HTML -->
+//   <script>
+//     function $(id) { return document.getElementById(id); }
+
+//     const keys = [];
+// async function ResetEsp() {
+//   if (!confirm("آیا مطمئن هستید که می‌خواهید دستگاه را مجددا راه اندازی کنید؟")) return;
+
+//   const res = await api('/reseEspt', {});
+//   if (res.success) {
+//     alert(" با موفقیت انجام شد. دستگاه در حال راه‌اندازی مجدد است.");
+//     location.reload(); // یا می‌تونی دستور خاصی برای ریبوت بزنی
+//   } else {
+//     alert("خطا در ریست : " + res.error);
+//   }
+// }
+
+//     async function api(path, data = null) {
+//     if (document.getElementById('err'))
+//   document.getElementById('err').textContent = 'اتصال به سرور قطع است!';
+
+
+//       try {
+//         const res = await fetch('/api' + path, {
+//           method: data ? 'POST' : 'GET',
+//           headers: {'Content-Type': 'application/json'},
+//           body: data ? JSON.stringify(data) : null
+//         });
+//         return await res.json();
+//       } catch (e) {
+//         $('#err').textContent = 'اتصال به سرور قطع است!';
+//         console.error(e);
+//         return { success: false, error: 'Network Error' };
+//       }
+//     }
+
+//       async function login() {
+//       alert("در حال ورود به سیستم"); // ✅ این خط رو اضافه کن
+
+//       const userEl = document.getElementById("user");
+//       const passEl = document.getElementById("pass");
+
+//       if (!userEl || !passEl) {
+//         alert("ورود ناموفق: عناصر ورودی پیدا نشدند!");
+//         return;
+//       }
+
+//       const user = userEl.value.trim();
+//       const pass = passEl.value;
+
+//       if (!user || !pass) {
+//         document.getElementById("err").textContent = "همه فیلدها الزامی است";
+//         return;
+//       }
+
+//       const res = await api("/login", { user, pass });
+//       if (res.success) {
+//         document.getElementById("login").classList.add("hidden");
+//         document.getElementById("main").classList.remove("hidden");
+//         console.log("user " + user + "    pass " + pass);
+//     await     loadKeys();
+//       } else {
+//         document.getElementById("err").textContent = res.error || "نام کاربری یا رمز اشتباه";
+//       }
+//     }
+
+//     async function loadKeys() {
+//         const data = await api('/keys');
+//         if (data.keys) {
+//           keys.length = 0;
+//           data.keys.forEach(k => keys.push(k)); // حالا هر کلید شامل value هم هست
+//           render();
+//         }
+//     }
+
+//     function render() {
+//      const g = document.getElementById('grid');
+//   if (!g) {
+//     console.warn("عنصر #grid پیدا نشد!");
+//     return;
+//   }
+//   g.innerHTML = ''; // یا هر محتوایی
+
+//       keys.forEach(k => {
+//         const div = document.createElement('div');
+//         div.className = 'key-card' + (k.isSystem ? ' system' : '');
+//         div.innerHTML = `
+//           <strong>${k.key}</strong>${k.isSystem ? ' (سیستمی)' : ''}
+//           <div>${inputFor(k)}</div>
+//           <button onclick="save('${k.key}')">ذخیره</button>
+//           <p class="error" id="e-${k.key}"></p>
+//         `;
+//         g.appendChild(div);
+//       });
+//     }
+//     function inputFor(k) {
+//       const val = k.value || '';
+//       if (k.type === 'dropdown' || k.type === 'bool') {
+//         return `<select id="i-${k.key}">${k.options.split(',').map(o => `<option value="${o}" ${val===o?'selected':''}>${o}</option>`).join('')}</select>`;
+//       } else if (k.type === 'mobile') {
+//         return `<input class="mobile-input" id="i-${k.key}" value="${val}" maxlength="10" placeholder="9121234567"/>`;
+//       } else if (k.type === 'int') {
+//         return `<input type="number" id="i-${k.key}" value="${val}" min="${k.min}" max="${k.max}"/>`;
+//       } else {
+//         return `<input type="text" id="i-${k.key}" value="${val}" maxlength="${k.max||''}" placeholder="حداقل ${k.min} کاراکتر"/>`;
+//       }
+//     }
+
+// function getVal(key) {
+//   const k = keys.find(x => x.key === key);
+//   return k && k.value !== undefined ? k.value : '';
+// }
+
+
+//     async function save(key) {
+//     const val = document.getElementById('i-' + key).value;
+//       const res = await api('/save', {key, value: val});
+//       if (res.success) {
+//         $('#e-'+key).textContent = '';
+//       } else {
+//         $('#e-'+key).textContent = res.error;
+//       }
+//     }
+
+//     async function factoryReset() {
+//       if (confirm('ریست فکتوری؟')) {
+//         await api('/reset');
+//         loadKeys();
+//       }
+//     }
+
+//     async function changePass() {
+//       const oldp = prompt('رمز فعلی:');
+//       if (!oldp) return;
+//       const newp = prompt('رمز جدید (حداقل 4 کاراکتر):');
+//       if (!newp || newp.length < 4) return alert('رمز کوتاه است');
+//       const res = await api('/changepass', {old: oldp, new: newp});
+//       alert(res.success ? 'رمز تغییر کرد' : res.error);
+//     }
+
+//     function logout() {
+//       $('#main').classList.add('hidden');
+//       $('#login').classList.remove('hidden');
+//       $('#user').value = $('#pass').value = '';
+//       $('#err').textContent = '';
+//     }
+//   </script>
+
+// </body>
+// </html>
+// )rawliteral";
+// #pragma endregion 
+
+// // --- توابع کمکی (قبل از setup) ---
+// bool authenticate(AsyncWebServerRequest *request)
+// {
+//   return true; // برای سادگی. در پروژه واقعی از session استفاده کن
+// }
+
+// String validateKey(const String &key, const String &value)
+// {
+//   for (int i = 0; i < numKeys; i++)
+//   {
+//     if (defaultKeys[i].key == key)
+//     {
+//       String t = defaultKeys[i].type;
+//       if (t == "int")
+//       {
+//         int v = value.toInt();
+//         int mn = defaultKeys[i].min.toInt();
+//         int mx = defaultKeys[i].max.toInt();
+//         if (v < mn || v > mx)
+//           return "عدد باید بین " + defaultKeys[i].min + " و " + defaultKeys[i].max + " باشد";
+//       }
+//       else if (t == "string")
+//       {
+//         int len = value.length();
+//         int mn = defaultKeys[i].min.toInt();
+//         int mx = defaultKeys[i].max.toInt();
+//         if (len < mn || (mx > 0 && len > mx))
+//           return "طول باید بین " + String(mn) + " و " + String(mx) + " باشد";
+//       }
+//       else if (t == "mobile")
+//       {
+//         if (value.length() != 10 || value[0] != '9')
+//           return "فرمت: 9121234567";
+//         for (int j = 1; j < 10; j++)
+//           if (!isDigit(value[j]))
+//             return "فقط عدد";
+//       }
+//       else if (t == "dropdown" || t == "bool")
+//       {
+//         if (defaultKeys[i].options.indexOf(value) == -1 && defaultKeys[i].options.indexOf("," + value) == -1)
+//         {
+//           return "مقدار مجاز نیست";
+//         }
+//       }
+//       return "";
+//     }
+//   }
+//   return "کلید نامعتبر";
+// }
+
+
+// void HtmlFunctions()
+// {
+
+
+//   server.on("/api/keys", HTTP_GET, [](AsyncWebServerRequest *req)
+//             {
+//     if (!authenticate(req)) return req->send(401);
+//     DynamicJsonDocument doc(2048);
+//     JsonArray arr = doc.createNestedArray("keys");
+//     for (int i = 0; i < numKeys; i++) {
+//       JsonObject obj = arr.createNestedObject();
+//       obj["key"] = defaultKeys[i].key;
+//       obj["type"] = defaultKeys[i].type;
+//       obj["value"] = prefs.getString(defaultKeys[i].key.c_str(), defaultKeys[i].defaultVal);
+//       obj["min"] = defaultKeys[i].min;
+//       obj["max"] = defaultKeys[i].max;
+//       obj["options"] = defaultKeys[i].options;
+//       obj["isSystem"] = defaultKeys[i].isSystem;
+//     }
+//     doc["theme"] = prefs.getString("theme", "dark");
+//     String out; serializeJson(doc, out);
+//     req->send(200, "application/json", out); });
+
+//   server.addHandler(new AsyncCallbackJsonWebHandler("/api/login", [](AsyncWebServerRequest *request, JsonVariant &json)
+//                                                     {
+//   if (!json.is<JsonObject>()) {
+//     request->send(400, "application/json", "{\"error\":\"فرمت JSON نامعتبر است\"}");
+//     return;
+//   }
+
+
+//   JsonObject obj = json.as<JsonObject>();
+//   String user = obj["user"];
+//   String pass = obj["pass"];
+
+//   if (user == username && pass == userPassword) {
+//     request->send(200, "application/json", "{\"success\":true}");
+//   } else {
+//     request->send(401, "application/json", "{\"error\":\"نام کاربری یا رمز اشتباه\"}");
+//   } }));
+
+//   server.addHandler(new AsyncCallbackJsonWebHandler("/api/save", [](AsyncWebServerRequest *request, JsonVariant &json)
+//                                                     {
+//   if (!json.is<JsonObject>()) {
+//     request->send(400, "application/json", "{\"error\":\"فرمت JSON نامعتبر است\"}");
+//     return;
+//   }
+
+//   JsonObject obj = json.as<JsonObject>();
+//   String key = obj["key"];
+//   String value = obj["value"];
+
+//   // اعتبارسنجی و ذخیره‌سازی
+//   if (!validateKey(key, value)) {
+//     request->send(400, "application/json", "{\"error\":\"مقدار نامعتبر\"}");
+//     return;
+//   }
+
+//   prefs.putString(key.c_str(), value);
+//   request->send(200, "application/json", "{\"success\":true}"); }));
+
+//   server.addHandler(new AsyncCallbackJsonWebHandler("/api/changepass", [](AsyncWebServerRequest *request, JsonVariant &json) {
+//   JsonObject obj = json.as<JsonObject>();
+//   String oldpass = obj["old"];
+//   String newpass = obj["new"];
+
+//   if (oldpass != userPassword) {
+//     request->send(403, "application/json", "{\"error\":\"رمز فعلی اشتباه است\"}");
+//     return;
+//   }
+
+//   if (newpass.length() < 4) {
+//     request->send(400, "application/json", "{\"error\":\"رمز جدید باید حداقل ۴ حرف باشد\"}");
+//     return;
+//   }
+
+//   userPassword = newpass;
+//   prefs.putString("userPassword", newpass);
+//   request->send(200, "application/json", "{\"success\":true}");
+// }));
+
+//   server.addHandler(new AsyncCallbackJsonWebHandler("/api/reset", [](AsyncWebServerRequest *request, JsonVariant &json)
+//                                                     {
+//   // عملیات ریست فکتوری
+//   prefs.clear();
+//   request->send(200, "application/json", "{\"success\":true}"); }));
+  
+//   server.on("/api/ResetEsp", HTTP_POST, [](AsyncWebServerRequest *request) {
+//    request->send(200, "application/json", "{\"success\":true}");
+
+//   delay(500);
+//   ESP.restart();
+// });
+ 
+//   server.on("/api/login", HTTP_POST, [](AsyncWebServerRequest *req)
+//             {
+//   Serial.println("[LOGIN] Request received!");  // اضافه شد
+//   if (req->hasParam("body", true)) {
+//     String body = req->getParam("body", true)->value();
+//     Serial.println("Body: " + body);  // اضافه شد
+//       DynamicJsonDocument doc(256);
+//       deserializeJson(doc, body);
+//       if (doc["user"] == username && doc["pass"] == userPassword) {
+//         req->send(200, "application/json", "{\"success\":true}");
+//       } else {
+//         req->send(401, "application/json", "{\"error\":\"اشتباه\"}");
+//       }
+//     } });
+
+//   server.on("/api/changepass", HTTP_POST, [](AsyncWebServerRequest *req)
+//             {
+//   if (!authenticate(req)) return req->send(401);
+//   if (req->hasParam("body", true)) {
+//     String body = req->getParam("body", true)->value();
+//     DynamicJsonDocument doc(256);
+//     deserializeJson(doc, body);
+    
+//     if (doc["old"] == userPassword && doc["new"].as<String>().length() >= 4) {
+//       userPassword = doc["new"].as<String>();
+//       prefs.putString("password", userPassword);
+//       req->send(200, "application/json", "{\"success\":true}");
+//     } else {
+//       req->send(400, "application/json", "{\"error\":\"خطا\"}");
+//     }
+//   } });
+
+//   server.on("/api/reset", HTTP_POST, [](AsyncWebServerRequest *req)
+//             {
+//     if (!authenticate(req)) return req->send(401);
+//     for (int i = 0; i < numKeys; i++) {
+//       prefs.putString(defaultKeys[i].key.c_str(), defaultKeys[i].defaultVal);
+//     }
+//     req->send(200, "application/json", "{\"success\":true}"); });
+
+//   server.on("/", HTTP_GET, [](AsyncWebServerRequest *req)
+//             { req->send(200, "text/html", index_html); });
+
+//   server.begin();
+// }
+
+// void setup()
+// {
+//   Serial.begin(9600);
+//   Serial.println("Starting ESP32 AP...");
+
+//   // --- راه‌اندازی Access Point ---
+//   WiFi.mode(WIFI_AP);
+//   bool ap_started = WiFi.softAP("ESP32-Config", "12345678"); // نام و رمز دلخواه
+
+//   if (ap_started)
+//   {
+//     Serial.println("AP Started Successfully!");
+//     Serial.print("IP Address: http://");
+//     Serial.println(WiFi.softAPIP()); // معمولاً: 192.168.4.1
+//   }
+//   else
+//   {
+//     Serial.println("AP Failed to Start!");
+//   }
+
+//   // --- ذخیره‌سازی تنظیمات ---
+//   prefs.begin("config", false);
+//   if (!prefs.isKey("username"))
+//     prefs.putString("username", "admin");
+//   if (!prefs.isKey("password"))
+//     prefs.putString("password", "1234");
+//   username = prefs.getString("username", "admin");
+//   userPassword = prefs.getString("password", "1234");
+
+//   // --- تنظیم کلیدهای پیش‌فرض ---
+//   for (int i = 0; i < numKeys; i++)
+//   {
+//     if (!prefs.isKey(defaultKeys[i].key.c_str()))
+//     {
+//       prefs.putString(defaultKeys[i].key.c_str(), defaultKeys[i].defaultVal);
+//     }
+//   }
+
+//   // --- API ---
+//   HtmlFunctions();
+// }
+
+// void loop() {}

@@ -1,0 +1,34 @@
+
+
+
+// void Allarm(int blinkCountPerLoop , int blinkDelayMs, int loopCount, int loopPauseMs)
+// {
+//   for (int i = 0; i < loopCount; i++)
+//   {
+//     for (int j = 0; j < blinkCountPerLoop; j++)
+//     {
+//       digitalWrite(AllarmLedPin, HIGH);
+//       digitalWrite(AllarmBuzzerPin, HIGH);
+//       vTaskDelay(blinkDelayMs);
+//       digitalWrite(AllarmLedPin, LOW);
+//       digitalWrite(AllarmBuzzerPin, LOW);
+//       vTaskDelay(blinkDelayMs);
+//     }
+//     vTaskDelay(loopPauseMs); // وقفه بین حلقه‌ها
+//   }
+// }
+
+// void AlarmTask(void *param)
+// {
+//   int *args = (int *)param;
+//   int blinkCountPerLoop = args[0];
+//   int blinkDelayMs = args[1];
+//   int loopCount = args[2];
+//   int loopPauseMs = args[3];
+//   free(args);
+
+//   Allarm(blinkCountPerLoop, blinkDelayMs, loopCount, loopPauseMs);
+
+//   alarmTriggered = false;
+//   vTaskDelete(NULL);
+// }

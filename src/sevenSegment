@@ -1,0 +1,29 @@
+; #include <Arduino.h>
+; #include <TM1637Display.h>
+
+; #define CLK 21
+; #define DIO 22
+
+; TM1637Display display(CLK, DIO);
+
+; String Number = "09360396731"; // شماره موبایل
+
+; void setup()
+; {
+;   display.setBrightness(0x0f); // بیشترین روشنایی
+; }
+
+; void loop()
+; {
+;   int len = Number.length();
+
+;   // حرکت 4 رقم همزمان از راست به چپ
+;   for (int i = 0; i <= len - 4; i++)
+;   {
+;     String part = Number.substring(i, i + 4);       // گرفتن 4 رقم
+;     int val = part.toInt();                         // تبدیل به عدد
+;     // display.showNumberDecEx(val, 0b01000000, true); // true = پیش‌صفر فعال
+;     display.showNumberDecEx(val, 0b00000000, true); // پیش‌صفر روشن، نقاط خاموش
+;     delay(1000);                                    // زمان نمایش هر 4 رقم
+;   }
+; }

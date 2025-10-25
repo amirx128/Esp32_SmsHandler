@@ -1,0 +1,42 @@
+// #include <Preferences.h>
+
+// Preferences preferences;
+
+// // ---------------- Save value (lowercase key, overwrite) ----------------
+// bool saveValue(String key, String value) {
+//     key.toLowerCase();                // کلید به حروف کوچک تبدیل می‌شود
+//     preferences.begin("myApp", false);
+//     bool ok = preferences.putString(key.c_str(), value);
+//     preferences.end();
+//     return ok;
+// }
+
+// // ---------------- Read value (lowercase key) ----------------
+// String readValue(String key) {
+//     key.toLowerCase();
+//     preferences.begin("myApp", true);
+//     String value = preferences.getString(key.c_str(), "");
+//     preferences.end();
+//     return value;
+// }
+
+// // ---------------- Clear all keys ----------------
+// void clearAll() {
+//     preferences.begin("myApp", false);
+//     preferences.clear();              // همه کلیدها پاک می‌شوند
+//     preferences.end();
+//     Serial.println("All keys cleared!");
+// }
+ 
+// void setup() {
+//     Serial.begin(9600);
+//     while (!Serial) delay(10);
+
+//     Serial.println();
+//     Serial.println("Console ready. Type 'help' for commands.");
+//     Serial.print("> ");
+// }
+
+// void loop() {
+   
+// }

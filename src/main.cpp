@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include "esp_adc_cal.h" // 👈 اضافه کن
 
 #pragma region define variables
 HardwareSerial SIM808(1);
@@ -11,176 +12,114 @@ int smsStatus = 1;    // 1=>send , 0=> not send
 String latitude = "";
 String longitude = "";
 String adminMobileNumber = "+989368054055";
-String allowedNumbers[] = {adminMobileNumber, "+989121234567"};
+String allowedNumbers[] = {adminMobileNumber};
 bool simIsOnline = false;
 const int allowedCount = sizeof(allowedNumbers) / sizeof(allowedNumbers[0]);
 String smsBuffer = "";
 unsigned long lastSmsCheck = 0;
 const unsigned long smsTimeout = 3000;           // زمان بررسی پیامک‌ها
 const unsigned long PIR_DETECTION_WINDOW = 2000; // بازه‌ی ۱ ثانیه
-const int PIR_REQUIRED_COUNT = 3;                // تعداد تحریک لازم در بازه
+const int PIR_REQUIRED_COUNT = 2;                // تعداد تحریک لازم در بازه
 const int PIR_LOOP_DELAY = 100;                  // صبر در انتهای هر دور (میلی‌ثانیه)
+volatile bool motionDetectedPublic = false;
+volatile bool SentTrigSmsNotFinish = false;
+
+enum SmsState
+{
+  SMS_IDLE,
+  SMS_INIT,
+  SMS_SEND_HEADER,
+  SMS_SEND_BODY,
+  SMS_SEND_CTRLZ,
+  SMS_WAIT_RESPONSE
+};
+
+struct SmsMessage
+{
+  String number;
+  String text;
+  int priority; // 0 = بالا، 1 = متوسط، 2 = پایین
+  unsigned long timestamp;
+};
+SmsState smsState = SMS_IDLE;
+unsigned long smsTimer = 0;
+int currentPriority = -1;
+SmsMessage currentMessage;
 struct PirSensor
 {
   int pin;
   String name;
+  bool isAnalog;
   unsigned long windowStart;
   int motionCount;
   bool motionDetected;
 
-  PirSensor() : pin(-1), name(""), windowStart(0), motionCount(0), motionDetected(false) {}
-  PirSensor(int p, const char *n)
-      : pin(p), name(String(n)), windowStart(0), motionCount(0), motionDetected(false) {}
+  // // برای EMA
+  // float emaValue;
+  // bool emaInitialized;
+
+  PirSensor()
+      : pin(-1), name(""), isAnalog(false),
+        windowStart(0), motionCount(0), motionDetected(false) {}
+
+  PirSensor(int p, const char *n, bool analog = false)
+      : pin(p), name(String(n)), isAnalog(analog),
+        windowStart(0), motionCount(0), motionDetected(false) {}
 };
 
+const int SMS_QUEUE_SIZE = 50;
+SmsMessage smsQueues[3][SMS_QUEUE_SIZE]; // سه صف برای سه اولویت
+int smsQueueHead[3] = {0, 0, 0};
+int smsQueueTail[3] = {0, 0, 0};
+
 PirSensor sensors[] = {
-    PirSensor(21, "sensor amoodi "),
-    PirSensor(22, "sensor ofoghi "),
-    PirSensor(23, "box pir")};
+    PirSensor(23, " sensor ofoghi ")};
 const int sensorCount = sizeof(sensors) / sizeof(sensors[0]);
+
+struct IncomingSms
+{
+  String sender;
+  String text;
+};
+
+const int INCOMING_SMS_QUEUE_SIZE = 5;
+IncomingSms incomingSmsQueue[INCOMING_SMS_QUEUE_SIZE];
+int incomingSmsHead = 0;
+int incomingSmsTail = 0;
+
+enum SmsReceiveState
+{
+  SMS_RX_IDLE,
+  SMS_RX_WAITING,
+  SMS_RX_READING
+};
+
+SmsReceiveState smsRxState = SMS_RX_IDLE;
+String smsRxBuffer = "";
+unsigned long smsRxStart = 0;
+unsigned long smsRxLastReceive = 0;
+
 #pragma endregion
 
 #pragma region functions signature
-bool initModuleSim808(String command, String expectedResponse, int timeout);
+bool SenAtCommanSim808(String command, String expectedResponse, int timeout);
 void SetupSim();
 String sendSms(String number, String msg);
-void monitorInputSms();
 bool getGpsLocation();
 void compileSms(String smsText, String num);
 bool PirIsTrige(PirSensor &sensor);
 void Allarm(int blinkCountPerLoop, int blinkDelayMs, int loopCount, int loopPauseMs);
 void AlarmTask(void *param);
-void CheckSensorsTask(void *param);
-
+void CheckSensorsTask();
 bool isAuthorizedNumber(String num);
-volatile bool alarmTriggered = false;
-
+void SmsSender();
 #pragma endregion
-
-void Allarm(int blinkCountPerLoop, int blinkDelayMs, int loopCount, int loopPauseMs)
+void TaskDelay(int delay)
 {
-  for (int i = 0; i < loopCount; i++)
-  {
-    for (int j = 0; j < blinkCountPerLoop; j++)
-    {
-      digitalWrite(AllarmLedPin, HIGH);
-      digitalWrite(AllarmBuzzerPin, HIGH);
-      vTaskDelay(blinkDelayMs / portTICK_PERIOD_MS);
-      digitalWrite(AllarmLedPin, LOW);
-      digitalWrite(AllarmBuzzerPin, LOW);
-      vTaskDelay(blinkDelayMs / portTICK_PERIOD_MS);
-    }
-    vTaskDelay(loopPauseMs / portTICK_PERIOD_MS); // وقفه بین حلقه‌ها
-  }
+  String t = String(delay);
+  Serial.println("delay for :  " + t + "  ms");
+  vTaskDelay(delay);
 }
-
-void SmsTask(void *param)
-{
-  PirSensor *temp = (PirSensor *)param;
-
-  Serial.println("📩 SMS Task started");
-
-  for (int i = 0; i < allowedCount; i++)
-  {
-    if (allowedNumbers[i].length() == 0)
-      continue; // اگر شماره خالی است
-
-    for (int j = 0; j < sensorCount; j++)
-    {
-      if (temp[j].motionDetected)
-      {
-        Serial.printf("📩 Sending SMS to %s about sensor %s\n",
-                      allowedNumbers[i].c_str(), temp[j].name.c_str());
-        sendSms(allowedNumbers[i], temp[j].name);
-      }
-    }
-  }
-
-  Serial.println("✅ All SMS sent. Deleting task...");
-  free(temp);
-  vTaskDelete(NULL);
-}
-
-void AlarmTask(void *param)
-{
-  int *args = (int *)param;
-  int blinkCountPerLoop = args[0];
-  int blinkDelayMs = args[1];
-  int loopCount = args[2];
-  int loopPauseMs = args[3];
-  free(args);
-
-  Allarm(blinkCountPerLoop, blinkDelayMs, loopCount, loopPauseMs);
-
-  alarmTriggered = false;
-  vTaskDelete(NULL);
-}
-
-void CheckSensorsTask(void *param)
-{
-  while (systemStatus == 1)
-  {
-    bool anyTriggered = false;
-
-    for (int i = 0; i < sensorCount; i++)
-    {
-      bool triggered = PirIsTrige(sensors[i]);
-      if (triggered)
-      {
-        anyTriggered = true;
-        break; // فقط یکی کافی است
-      }
-    }
-
-    // اگر حرکتی دید و هنوز آلارم فعال نیست
-    if (anyTriggered && !alarmTriggered)
-    {
-      alarmTriggered = true;
-
-      Serial.println("⚠️ Motion detected! Creating alarm thread...");
-
-      // آرگومان‌های ورودی تابع آلارم
-      int *args = (int *)malloc(4 * sizeof(int));
-      args[0] = 3;    // blinkCountPerLoop
-      args[1] = 300;  // blinkDelayMs
-      args[2] = 2;    // loopCount
-      args[3] = 1000; // loopPauseMs
-
-      xTaskCreate(AlarmTask, "AlarmTask", 4096, args, 1, NULL);
-
-      #pragma region  sms
-      PirSensor *temp = (PirSensor *)malloc(sizeof(PirSensor) * sensorCount);
-      if (temp == NULL)
-      {
-        Serial.println("❌ Failed to allocate memory for sensors!");
-        vTaskDelete(NULL);
-        return;
-      }
-
-      for (int i = 0; i < sensorCount; i++)
-      {
-        temp[i] = sensors[i];
-      }
-
-      Serial.println("🚨 Alarm started!");
-
-      BaseType_t result = xTaskCreate(
-          SmsTask, "SmsTask", 4096, temp, 1, NULL);
-
-      if (result != pdPASS)
-      {
-        Serial.println("❌ Failed to create SMS Task!");
-        free(temp);
-      }
-
-      #pragma endregion
-    
-    }
-
-    vTaskDelay(100 / portTICK_PERIOD_MS); // هر 100 میلی‌ثانیه چک کنه
-  }
-}
-
 bool isAuthorizedNumber(String num)
 {
   for (int i = 0; i < allowedCount; i++)
@@ -193,44 +132,199 @@ bool isAuthorizedNumber(String num)
   return false;
 }
 
+String SmsTextGenerator(String sensorName, String msg)
+{
+  String result = "trig sensor : " + sensorName + " " + msg;
+  return result;
+}
+
+String ReportSmsTextGenerator(String senderNumber, String msg)
+{
+  String result = "sender number : " + senderNumber + " ---msg--- " + msg;
+  return result;
+}
+
+bool enqueueSms(String number, String text, int priority)
+{
+  if (priority < 0 || priority > 2)
+    return false;
+
+  int nextTail = (smsQueueTail[priority] + 1) % SMS_QUEUE_SIZE;
+
+  smsQueues[priority][smsQueueTail[priority]] = {number, text, priority, millis()};
+  smsQueueTail[priority] = nextTail;
+  return true;
+}
+
+bool SenAtCommanSim808(String command, String expectedResponse, int timeout)
+{
+  Serial.print("Sending command: ");
+  Serial.println(command);
+
+  SIM808.flush();          // پاک‌سازی بافر
+  SIM808.println(command); // ارسال دستور
+
+  unsigned long startTime = millis();
+  String fullResponse = "";
+
+  while (millis() - startTime < timeout)
+  {
+    if (SIM808.available())
+    {
+      String line = SIM808.readStringUntil('\n');
+      line.trim(); // حذف فاصله‌ها و کاراکترهای اضافی
+
+      if (line.length() > 0)
+      {
+        Serial.println("Received line: " + line);
+        fullResponse += line;
+
+        if (fullResponse.indexOf(expectedResponse) != -1)
+        {
+          Serial.println("✅ Command executed successfully.");
+          TaskDelay(100);
+          return true;
+        }
+      }
+    }
+  }
+
+  Serial.println("❌ Failed to execute command: " + command);
+  return false;
+}
+void SetupSim()
+{
+  SIM808.begin(9600, SERIAL_8N1, SIM808_RX, SIM808_TX);
+  TaskDelay(5000);
+
+  Serial.println("Initializing SIM808...");
+
+  if (!SenAtCommanSim808("AT", "OK", 1000))
+    return;
+  // فعال کردن GPS
+  if (!SenAtCommanSim808("AT+CGNSPWR=1", "OK", 2000))
+    return; // روشن کردن GPS
+  TaskDelay(2000);
+  if (!SenAtCommanSim808("AT+CGNSSEQ=RMC", "OK", 2000))
+    return; // مشخص کردن نوع داده GPS
+
+  if (!SenAtCommanSim808("AT+CGNSINF", "OK", 2000))
+    return; // بررسی وضعیت GPS
+
+  if (!SenAtCommanSim808("ATE0", "OK", 1000))
+    return; // خاموش کردن Echo برای تمیز بودن خروجی
+
+  if (!SenAtCommanSim808("AT+CPIN?", "READY", 2000))
+    return; // بررسی سیم‌کارت
+
+  if (!SenAtCommanSim808("AT+CREG?", "0,1", 3000))
+    return; // بررسی ثبت در شبکه
+  if (!SenAtCommanSim808("AT+CSQ", "OK", 1000))
+    return; // بررسی قدرت سیگنال (اختیاری ولی مفید)
+
+  // تنظیمات SMS
+  if (!SenAtCommanSim808("AT+CMGF=1", "OK", 1000))
+    return; // حالت TEXT
+  if (!SenAtCommanSim808("AT+CNMI=2,2,0,0,0", "OK", 1000))
+    return; // نمایش مستقیم پیام‌ها
+
+  Serial.println("✅ SIM808 Initialized Successfully!");
+  simIsOnline = true;
+}
+
 bool PirIsTrige(PirSensor &sensor)
 {
   unsigned long now = millis();
   int pirState = digitalRead(sensor.pin);
 
+  if (sensor.motionCount == 0)
+  {
+    sensor.windowStart = now;
+  }
+  // اگر تحریک شد
   if (pirState == HIGH)
   {
-    Serial.println("sensor >>> " + sensor.name + " <<< is triged , count : " + sensor.motionCount);
+    Serial.println("PirIsTrige ===>>>   Sensor " + sensor.name + " triggered | Count: " + String(sensor.motionCount));
+
+    // اگر پنجره‌ی زمانی تموم شده باشه، شمارنده صفر بشه و پنجره جدید شروع بشه
     if (now - sensor.windowStart > PIR_DETECTION_WINDOW)
     {
       sensor.windowStart = now;
       sensor.motionCount = 1;
-      sensor.motionDetected = false;
     }
     else
     {
       sensor.motionCount++;
     }
 
-    if (sensor.motionCount >= PIR_REQUIRED_COUNT && !sensor.motionDetected)
+    sensor.motionDetected = true;
+
+    // اگر تعداد تحریک‌ها کافی بود
+    if (sensor.motionCount >= PIR_REQUIRED_COUNT)
     {
-      sensor.motionDetected = true;
+      Serial.println("✅ Motion confirmed for sensor: " + sensor.name +
+                     " | Count: " + String(sensor.motionCount) +
+                     " / Required: " + String(PIR_REQUIRED_COUNT));
+
+      // ریست شمارنده و شروع پنجره جدید
+      sensor.motionCount = 0;
+      sensor.windowStart = now;
+      sensor.motionDetected = false;
+
       return true;
     }
   }
-
-  if (now - sensor.windowStart > PIR_DETECTION_WINDOW)
+  else
   {
-    sensor.motionCount = 0;
+    Serial.println("PirIsTrige ===>>>   Sensor " + sensor.name + "        in else block.....................");
+    // اگر تحریک نبود
     sensor.motionDetected = false;
+
+    // اگر پنجره‌ی زمانی تموم شده باشه، شمارنده صفر بشه
+    if (now - sensor.windowStart > PIR_DETECTION_WINDOW)
+    {
+      sensor.windowStart = now;
+      sensor.motionCount = 0;
+    }
   }
 
   return false;
 }
 
+void CheckSensorsTask()
+{
+  if (systemStatus != 1)
+    return; // اگر سیستم فعال نیست، خروج
+
+  SentTrigSmsNotFinish = false;
+
+  for (int i = 0; i < sensorCount; i++)
+  {
+    PirSensor &sensor = sensors[i];
+
+    if (PirIsTrige(sensor))
+    {
+      Serial.println("✅ Triggered: " + sensor.name + " → Sending SMS");
+
+      motionDetectedPublic = true;
+      SentTrigSmsNotFinish = true;
+
+      for (int j = 0; j < allowedCount; j++)
+      {
+        String message = "Motion detected on sensor: " + sensor.name;
+        Serial.println("Sending SMS to: " + allowedNumbers[j] + " | Text: " + message);
+        enqueueSms(allowedNumbers[j], message, 2);
+      }
+    }
+    else
+    {
+      motionDetectedPublic = false;
+    }
+  }
+}
 bool isGpsOn()
 {
-  SIM808.println("AT+CGNSPWR?");
+  SenAtCommanSim808("AT+CGNSPWR?", "OK", 1000);
   unsigned long start = millis();
   String resp = "";
   while (millis() - start < 1000)
@@ -263,13 +357,14 @@ bool getGpsLocation()
 {
   if (!isGpsOn())
   {
-    SIM808.println("AT+CGNSPWR=1");
-    delay(1000); // اجازه بده روشن شود
+    SenAtCommanSim808("AT+CGNSPWR=1", "OK", 1000);
+    TaskDelay(1000); // اجازه بده روشن شود
   }
 
   Serial.println("getGpsLocation()");
-  SIM808.println("AT+CGNSINF");
-  delay(150); // اجازه برای پاسخ
+  SenAtCommanSim808("AT+CGNSINF", "OK", 1000);
+
+  TaskDelay(150); // اجازه برای پاسخ
 
   unsigned long start = millis();
   String fullResp = "";
@@ -334,45 +429,6 @@ bool getGpsLocation()
   return false;
 }
 
-void SetupSim()
-{
-  SIM808.begin(9600, SERIAL_8N1, SIM808_RX, SIM808_TX);
-  delay(5000);
-
-  Serial.println("Initializing SIM808...");
-
-  if (!initModuleSim808("AT", "OK", 1000))
-    return;
-
-  // فعال کردن GPS
-  if (!initModuleSim808("AT+CGNSPWR=1", "OK", 2000))
-    return; // روشن کردن GPS
-  delay(2000);
-  if (!initModuleSim808("AT+CGNSSEQ=RMC", "OK", 2000))
-    return; // مشخص کردن نوع داده GPS
-  delay(1000);
-  if (!initModuleSim808("AT+CGNSINF", "OK", 2000))
-    return; // بررسی وضعیت GPS
-
-  if (!initModuleSim808("ATE0", "OK", 1000))
-    return; // خاموش کردن Echo برای تمیز بودن خروجی
-  if (!initModuleSim808("AT+CPIN?", "READY", 2000))
-    return; // بررسی سیم‌کارت
-  if (!initModuleSim808("AT+CREG?", "0,1", 3000))
-    return; // بررسی ثبت در شبکه
-  if (!initModuleSim808("AT+CSQ", "OK", 1000))
-    return; // بررسی قدرت سیگنال (اختیاری ولی مفید)
-
-  // تنظیمات SMS
-  if (!initModuleSim808("AT+CMGF=1", "OK", 1000))
-    return; // حالت TEXT
-  if (!initModuleSim808("AT+CNMI=2,2,0,0,0", "OK", 1000))
-    return; // نمایش مستقیم پیام‌ها
-
-  Serial.println("✅ SIM808 Initialized Successfully!");
-  simIsOnline = true;
-}
-
 String sendSms(String number, String msg)
 {
   if (smsStatus == 0)
@@ -385,12 +441,12 @@ String sendSms(String number, String msg)
   String txt = "Sending SMS... to " + number + "msg :    " + msg;
   Serial.println();
 
-  if (!initModuleSim808("AT+CMGF=1", "OK", 1000))
+  if (!SenAtCommanSim808("AT+CMGF=1", "OK", 1000))
   {
     Serial.println("init failed, reinitializing SIM...");
     simIsOnline = false;
     SetupSim();
-    if (!simIsOnline || !initModuleSim808("AT+CMGF=1", "OK", 1000))
+    if (!simIsOnline || !SenAtCommanSim808("AT+CMGF=1", "OK", 1000))
       return "false";
   }
 
@@ -398,47 +454,204 @@ String sendSms(String number, String msg)
   SIM808.print("AT+CMGS=\"");
   SIM808.print(number); // شماره مقصد
   SIM808.println("\"");
-  delay(2000); // زمان انتظار برای پاسخ
+  TaskDelay(100); // زمان انتظار برای پاسخ
 
   // ارسال متن پیامک
   SIM808.print(msg);
-  delay(100);
+  TaskDelay(100);
 
   // ارسال Ctrl+Z برای ارسال پیام
   SIM808.write(26);
-  delay(3000); // زمان کافی برای ارسال پیامک
+  TaskDelay(3000); // زمان کافی برای ارسال پیامک
 
   Serial.print(" SMS sent.... : : :     ");
   Serial.println(txt);
   return "true";
 }
 
-bool initModuleSim808(String command, String expectedResponse, int timeout)
+void SmsSender()
 {
-  Serial.print("Sending command: ");
-  Serial.println(command);
-  SIM808.println(command); // ارسال دستور AT به ماژول
+  int selectedPriority = -1;
+  int selectedIndex = -1;
+  unsigned long oldestTime = ULONG_MAX;
 
-  long int time = millis();
-  while ((millis() - time) < timeout)
+  if (smsState == SMS_IDLE)
   {
-    if (SIM808.available())
-    { // بررسی داده‌های دریافتی
-      String response = SIM808.readString();
-      Serial.print("Response: ");
-      Serial.println(response);
+    // پیدا کردن قدیمی‌ترین پیام با اولویت بالا
+    for (int p = 0; p < 3; p++)
+    {
+      int head = smsQueueHead[p];
+      int tail = smsQueueTail[p];
 
-      if (response.indexOf(expectedResponse) != -1)
+      while (head != tail)
       {
-        Serial.println("Command executed successfully.");
-        return true; // اگر پاسخ مورد نظر دریافت شد
+        SmsMessage &msg = smsQueues[p][head];
+        if (msg.timestamp < oldestTime)
+        {
+          oldestTime = msg.timestamp;
+          selectedPriority = p;
+          selectedIndex = head;
+        }
+        head = (head + 1) % SMS_QUEUE_SIZE;
       }
     }
+
+    // اگر پیام پیدا شد، آماده‌سازی برای ارسال
+    if (selectedIndex != -1)
+    {
+      currentPriority = selectedPriority;
+      currentMessage = smsQueues[selectedPriority][selectedIndex];
+      smsQueueHead[selectedPriority] = (selectedIndex + 1) % SMS_QUEUE_SIZE;
+      smsState = SMS_INIT;
+      smsTimer = millis();
+      return;
+    }
+
+    return; // هیچ پیامکی در صف نیست
   }
 
-  Serial.print("Failed to execute command: ");
-  Serial.println(command); // نمایش دستور ناموفق در سریال مانیتور
-  return false;            // اگر پاسخ موردنظر در زمان مشخص دریافت نشود
+  switch (smsState)
+  {
+  case SMS_INIT:
+    SIM808.println("AT+CMGF=1");
+    smsState = SMS_SEND_HEADER;
+    smsTimer = millis();
+    break;
+
+  case SMS_SEND_HEADER:
+    if (millis() - smsTimer > 500)
+    {
+      SIM808.print("AT+CMGS=\"");
+      SIM808.print(currentMessage.number);
+      SIM808.println("\"");
+      smsState = SMS_SEND_BODY;
+      smsTimer = millis();
+    }
+    break;
+
+  case SMS_SEND_BODY:
+    if (millis() - smsTimer > 500)
+    {
+      SIM808.print(currentMessage.text);
+      smsState = SMS_SEND_CTRLZ;
+      smsTimer = millis();
+    }
+    break;
+
+  case SMS_SEND_CTRLZ:
+    if (millis() - smsTimer > 500)
+    {
+      SIM808.write(26); // Ctrl+Z
+      smsState = SMS_WAIT_RESPONSE;
+      smsTimer = millis();
+    }
+    break;
+
+  case SMS_WAIT_RESPONSE:
+    if (millis() - smsTimer > 3000)
+    {
+      Serial.printf("📩 SMS sent to %s: %s\n",
+                    currentMessage.number.c_str(),
+                    currentMessage.text.c_str());
+
+      smsState = SMS_IDLE;
+      currentPriority = -1;
+    }
+    break;
+  }
+}
+
+void monitorInputSmsStateMachine()
+{
+  switch (smsRxState)
+  {
+  case SMS_RX_IDLE:
+    if (SIM808.available())
+    {
+      smsRxBuffer = "";
+      smsRxStart = millis();
+      smsRxLastReceive = millis();
+      smsRxState = SMS_RX_READING;
+    }
+    break;
+
+  case SMS_RX_READING:
+    while (SIM808.available())
+    {
+      char c = SIM808.read();
+      smsRxBuffer += c;
+      smsRxLastReceive = millis();
+    }
+
+    // اگر 500ms از آخرین دریافت گذشته، فرض کن پیامک کامل شده
+    if (millis() - smsRxLastReceive > 500 && smsRxBuffer.length() > 0)
+    {
+      smsRxState = SMS_RX_WAITING;
+    }
+    break;
+
+  case SMS_RX_WAITING:
+    if (smsRxBuffer.indexOf("+CMT:") != -1)
+    {
+      // استخراج شماره فرستنده
+      String sender = "";
+      int q1 = smsRxBuffer.indexOf("\"");
+      int q2 = smsRxBuffer.indexOf("\"", q1 + 1);
+      if (q1 != -1 && q2 != -1)
+      {
+        sender = smsRxBuffer.substring(q1 + 1, q2);
+      }
+
+      // استخراج متن پیامک
+      String text = "";
+      int lastQuote = smsRxBuffer.lastIndexOf("\"");
+      if (lastQuote != -1 && lastQuote + 1 < smsRxBuffer.length())
+      {
+        text = smsRxBuffer.substring(lastQuote + 1);
+      }
+
+      text.replace("\r", "");
+      text.replace("\n", "");
+      text.trim();
+
+      // پاکسازی کاراکترهای خراب
+      for (int i = 0; i < text.length(); i++)
+      {
+        if (text[i] < 32 || text[i] > 126)
+        {
+          text[i] = ' ';
+        }
+      }
+
+      // اضافه به صف
+      int nextTail = (incomingSmsTail + 1) % INCOMING_SMS_QUEUE_SIZE;
+      if (nextTail != incomingSmsHead)
+      {
+        incomingSmsQueue[incomingSmsTail] = {sender, text};
+        incomingSmsTail = nextTail;
+        Serial.println("📥 SMS queued from " + sender + ": " + text);
+      }
+      else
+      {
+        Serial.println("⚠️ Incoming SMS queue full. Message dropped.");
+      }
+    }
+
+    smsRxState = SMS_RX_IDLE;
+    break;
+  }
+}
+void processIncomingSmsQueue()
+{
+  if (incomingSmsHead != incomingSmsTail)
+  {
+    IncomingSms msg = incomingSmsQueue[incomingSmsHead];
+    incomingSmsHead = (incomingSmsHead + 1) % INCOMING_SMS_QUEUE_SIZE;
+
+    // پردازش پیامک
+    enqueueSms(adminMobileNumber, ReportSmsTextGenerator(msg.sender, msg.text), 0);
+    compileSms(msg.text, msg.sender);
+  }
 }
 
 void compileSms(String smsText, String num)
@@ -447,7 +660,8 @@ void compileSms(String smsText, String num)
   {
     if (num.startsWith("989"))
     {
-      sendSms(num, "access denied");
+      enqueueSms(num, "access denied", 0);
+
       Serial.println("⛔ access denied " + num);
       return;
     }
@@ -463,36 +677,36 @@ void compileSms(String smsText, String num)
     if (getGpsLocation())
     {
       String link = "https://maps.google.com/?q=" + latitude + "," + longitude;
-      sendSms(num, link); // شماره دلخواه
+      enqueueSms(num, link, 1); // شماره دلخواه
     }
     else
     {
-      sendSms(num, "GPS not ready");
+      enqueueSms(num, "GPS not ready", 1); // شماره دلخواه
     }
   }
   else if (smsText == "disarm")
   {
     systemStatus = 2;
-    sendSms(num, "system is disarm");
-    sendSms(adminMobileNumber, "system is disarm for user : " + num);
+    enqueueSms(num, "system is disarm", 1);
+    enqueueSms(adminMobileNumber, "system is disarm for user : " + num, 1);
   }
   else if (smsText == "arm")
   {
     systemStatus = 1;
-    sendSms(num, "system is arm");
-    sendSms(adminMobileNumber, "system is arm for user : " + num);
+    enqueueSms(num, "system is arm", 1);
+    enqueueSms(adminMobileNumber, "system is arm for user : " + num, 1);
   }
   else if (smsText == "smson")
   {
     smsStatus = 1;
-    sendSms(num, "system sms is on");
-    sendSms(adminMobileNumber, "system sms is on ,  user : " + num);
+    enqueueSms(num, "system sms is on", 1);
+    enqueueSms(adminMobileNumber, "system sms is on ,  user : " + num, 1);
   }
   else if (smsText == "smsoff")
   {
     smsStatus = 0;
-    sendSms(num, "system sms is off");
-    sendSms(adminMobileNumber, "system sms is off ,  user : " + num);
+    enqueueSms(num, "system sms is off", 1);
+    enqueueSms(adminMobileNumber, "system sms is off ,  user : " + num, 1);
   }
   else
   {
@@ -500,91 +714,90 @@ void compileSms(String smsText, String num)
   }
 }
 
-void monitorInputSms()
-{
-  String response = "";
-  unsigned long start = millis();
-  while (millis() - start < 3000)
-  {
-    while (SIM808.available())
-    {
-      response += (char)SIM808.read();
-    }
-  }
-
-  if (response.length() == 0 || response.indexOf("+CMT:") == -1)
-    return;
-
-  Serial.println("Raw Response from SIM808:");
-  Serial.println(response);
-
-  // استخراج شماره فرستنده
-  String senderNumber = "";
-  int quoteStart = response.indexOf("\"");
-  int quoteEnd = response.indexOf("\"", quoteStart + 1);
-  if (quoteStart != -1 && quoteEnd != -1)
-  {
-    senderNumber = response.substring(quoteStart + 1, quoteEnd);
-  }
-
-  // استخراج متن پیامک
-  String smsText = "";
-  int lastQuote = response.lastIndexOf("\"");
-  if (lastQuote != -1 && lastQuote + 1 < response.length())
-  {
-    smsText = response.substring(lastQuote + 1);
-  }
-
-  // پاک‌سازی کاراکترهای خراب یا غیرقابل چاپ
-  smsText.replace("\r", "");
-  smsText.replace("\n", "");
-  smsText.trim();
-  for (int i = 0; i < smsText.length(); i++)
-  {
-    if (smsText[i] < 32 || smsText[i] > 126)
-    {
-      smsText[i] = ' ';
-    }
-  }
-
-  Serial.println("------------ SMS Details ------------");
-  Serial.print("Sender Number: ");
-  Serial.println(senderNumber);
-  Serial.print("Message Text: ");
-  Serial.println(smsText);
-  Serial.println("------------------------------------- send  SMS");
-
-  if (senderNumber.length() > 3 && smsText.length() > 0)
-  {
-    sendSms(adminMobileNumber, "senderNumber: " + senderNumber + " msg: " + smsText);
-    compileSms(smsText, senderNumber);
-  }
-  else
-  {
-    Serial.println("⚠️ Failed to extract sender or message text.");
-  }
-}
-
+esp_adc_cal_characteristics_t adc_chars;
 void setup()
 {
+
+  SIM808.begin(9600, SERIAL_8N1, SIM808_RX, SIM808_TX);
+  delay(3000);
+
   Serial.begin(9600);
-  xTaskCreate(CheckSensorsTask, "CheckSensorsTask", 4096, NULL, 1, NULL);
+  // کانفیگ ADC
+  analogSetPinAttenuation(34, ADC_11db); // تا 3.3V
+  analogSetWidth(12);                    // 12-bit
 
-  for (int i = 0; i < sensorCount; i++)
-  {
-    pinMode(sensors[i].pin, INPUT);
-  }
-  pinMode(AllarmBuzzerPin, OUTPUT);
-  pinMode(AllarmLedPin, OUTPUT);
+  // characterize با مقدار پیش‌فرض Vref (میلی‌ولت)
+  esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_11, ADC_WIDTH_BIT_12, 1100, &adc_chars);
 
-  SetupSim();
+  // پین‌ها
+  pinMode(34, INPUT);          // آنالوگ (ورودی-تنها OK)
+  pinMode(21, INPUT);          // دیجیتال عادی
+  pinMode(22, INPUT_PULLDOWN); // دیجیتال با PullDown
+  pinMode(23, INPUT_PULLUP);   // دیجیتال با PullUp
 
-  String response = sendSms("+989368054055", "device setup done ");
+  Serial.println("Ready...");
+
+  // esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_11, ADC_WIDTH_BIT_12, 1100, &adc_chars);
+
+  // SenAtCommanSim808("AT", "OK", 3000);
+
+  // Serial.begin(9600);
+
+  // for (int i = 0; i < sensorCount; i++)
+  // {
+  //   pinMode(sensors[i].pin, INPUT);
+  // }
+  // pinMode(34, INPUT);
+  // pinMode(AllarmBuzzerPin, OUTPUT);
+  // pinMode(AllarmLedPin, OUTPUT);
+
+  // Serial.println(" device setup sim  .....................  start");
+
+  // SetupSim();
+
+  // enqueueSms("+989368054055", "device setup done ", 1);
 }
 
 void loop()
 {
-  monitorInputSms();
-  getGpsLocation();
-  vTaskDelay(1000 / portTICK_PERIOD_MS); // هر 100 میلی‌ثانیه چک کنه
+  // خواندن دیجیتال‌ها
+  int d21 = digitalRead(21);
+
+  // pinMode(21, OUTPUT);
+  // digitalWrite(21, LOW);
+  // delay(50);                 // 50 میلی‌ثانیه کافی است
+  // pinMode(21, INPUT); // دوباره به حالت ورودی برای سنسور
+
+  // لاگ یک‌خطی
+  Serial.printf(" (vref: %u mV) , D21:%d ,  \n",
+                (unsigned)adc_chars.vref, d21);
+
+  if (d21 == 1)
+  {
+    // ریست نرم‌افزاری خروجی
+    pinMode(21, INPUT_PULLDOWN); // آزاد شدن پین
+    delay(50);                          // چند میلی‌ثانیه کوتاه
+    pinMode(21, INPUT);          // بازگشت به حالت اولیه
+  }
+
+  delay(500);
+
+  // CheckSensorsTask();
+  // if (motionDetectedPublic)
+  // {
+  //   Serial.println("***********************************************       allarm on");
+  //   // آژیر روشن
+  //   digitalWrite(AllarmBuzzerPin, HIGH);
+  //   digitalWrite(AllarmLedPin, HIGH);
+  // }
+  // else
+  // {
+  //   // آژیر خاموش
+  //   digitalWrite(AllarmBuzzerPin, LOW);
+  //   digitalWrite(AllarmLedPin, LOW);
+  // }
+  // SmsSender();
+  // monitorInputSmsStateMachine(); // دریافت پیامک بدون بلاک شدن
+  // processIncomingSmsQueue();     // پردازش پیامک‌ها با تأخیر
+  // getGpsLocation();
 }

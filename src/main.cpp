@@ -5,19 +5,23 @@
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include <time.h>
+
 bool Public_MotionDetected = false;
 unsigned long epochStartTime = 0;
+char lastOktime[32];
+
+void SetPublicVariablesFromPrefs();
+bool enqueueSms(String number, String text, int priority);
 
 void printTimestampReadable(uint64_t timestampMs)
 {
   time_t timestampSec = (timestampMs / 1000) + 12600; // تبدیل به ثانیه
   struct tm *timeinfo = localtime(&timestampSec);     // یا gmtime برای UTC
 
-  char buffer[32];
-  strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", timeinfo);
+  strftime(lastOktime, sizeof(lastOktime), "%Y-%m-%d %H:%M:%S", timeinfo);
 
   Serial.print(" ok time is :       ");
-  Serial.println(buffer);
+  Serial.println(lastOktime);
 }
 
 #pragma region Sim808_Variables
@@ -140,6 +144,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     body { font-family: Tahoma; background: var(--bg); color: var(--text); margin:0; }
     .container { max-width: 900px; margin: 20px auto; padding: 20px; }
     .card { background: var(--card); border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+    .card2 {  background: #047445ff; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 12px hsla(0, 100%, 50%, 1.00); }
     h1, h2 { text-align: center; color: var(--p); }
     input, select, button { padding: 10px; margin: 5px 0; border-radius: 8px; width: 100%; border: 1px solid #555; background: rgba(255,255,255,0.1); color: var(--text); }
     button { background: var(--p); color: white; border: none; cursor: pointer; font-weight: bold; }
@@ -170,9 +175,10 @@ const char index_html[] PROGMEM = R"rawliteral(
   <div id="main" class="container hidden">
     <div class="card">
       <h1>مدیریت تنظیمات</h1>
-      <div class="card">
+      <div class="card2">
   <h2>تنظیم ساعت دستگاه</h2>
   <input type="datetime-local" id="deviceTime"  step="1" />
+ <input type="button" id="sendTestSms" value="ارسال تست SMS" onclick="sendTestSms()" />
   <button onclick="syncTime()">همگام‌سازی با دستگاه</button>
 </div>
 
@@ -368,6 +374,14 @@ function getVal(key) {
       $('#user').value = $('#pass').value = '';
       $('#err').textContent = '';
     }
+
+    function sendTestSms() {
+  fetch("/api/sendTestSms", { method: "POST" })
+    .then(res => res.json())
+    .then(data => {
+      alert(data.success ? "📤 SMS تست ارسال شد" : "❌ خطا در ارسال SMS");
+    });
+}
   </script>
 
 </body>
@@ -386,7 +400,6 @@ bool public_SimIsOnline;
 std::vector<String> public_List_AllAlternetMobiles;
 const int AllarmLedPin = 2;
 const int AllarmBuzzerPin = 2;
-unsigned long StartTime = millis();
 unsigned long public_DeviceTime;
 
 #pragma endregion
@@ -458,7 +471,9 @@ void HtmlFunctions()
 
   Serial.print("browser time ");
   Serial.println((unsigned long long)timestamp);
-printTimestampReadable(timestamp);
+  
+  printTimestampReadable(timestamp);
+  
   prefs.putULong("epochStartTime", timestamp);
   epochStartTime = timestamp;
 
@@ -469,6 +484,12 @@ printTimestampReadable(timestamp);
   unsigned long now = millis();
   unsigned long currentTime = epochStartTime + now;
   request->send(200, "application/json", "{\"timestamp\":" + String(currentTime) + "}"); });
+
+  server.on("/api/sendTestSms", HTTP_POST, [](AsyncWebServerRequest *request)
+            {
+    Serial.println("send test message ");
+  enqueueSms(public_OwnerMobileNumber , " test message  at   " + String(lastOktime),2); // ✅ اجرای تابع SMS
+  request->send(200, "application/json", "{\"success\":true}"); });
 
   server.on("/api/keys", HTTP_GET, [](AsyncWebServerRequest *req)
             {
@@ -525,9 +546,13 @@ printTimestampReadable(timestamp);
   request->send(400, "application/json", "{\"error\":\"مقدار نامعتبر: " + ValidationResult + "\"}");
   return;
 }
-  Serial.println("save after ValidationResult :    "+ ValidationResult +"     validateKey   =>>>  key :  " + key + "  value :  " + value);
 
   prefs.putString(key.c_str(), value);
+
+  Serial.println(" after save ValidationResult :    "+ ValidationResult +"     validateKey   =>>>  key :  " + key + "  value :  " + value);
+ 
+  SetPublicVariablesFromPrefs();
+ 
   request->send(200, "application/json", "{\"success\":true}"); }));
 
   server.addHandler(new AsyncCallbackJsonWebHandler("/api/changepass", [](AsyncWebServerRequest *request, JsonVariant &json)
@@ -636,8 +661,10 @@ void SetAllarmState()
     digitalWrite(AllarmLedPin, LOW);
   }
 }
+
 void SplitMobiles();
-void SetPublicVariables()
+
+void SetPublicVariablesFromPrefs()
 {
   public_SystemStatus = prefs.getBool("systemStatus", false);
 
@@ -645,6 +672,7 @@ void SetPublicVariables()
     prefs.putString("username", "admin");
   if (!prefs.isKey("password"))
     prefs.putString("password", "1234");
+
   username = prefs.getString("username", "admin");
   userPassword = prefs.getString("password", "1234");
   // --- تنظیم کلیدهای پیش‌فرض ---
@@ -697,7 +725,6 @@ bool isGpsOn();
 bool getGpsLocation();
 void compileSms(String smsText, String num);
 String ReportSmsTextGenerator(String senderNumber, String msg);
-bool enqueueSms(String number, String text, int priority);
 void monitorInputSms();
 bool SenAtCommanSim808(String command, String expectedResponse, int timeout);
 void SetupSim();
@@ -782,9 +809,15 @@ void SmsSender()
   switch (smsState)
   {
   case SMS_INIT:
-    SenAtCommanSim808("AT+CMGF=1", "ok", 1000);
+    SIM808.println("AT+CMGF=1");
     smsState = SMS_SEND_HEADER;
     smsTimer = millis();
+    TaskDelay(100); // کمی صبر برای دریافت پاسخ
+    while (SIM808.available())
+    {
+      Serial.write(SIM808.read()); // چاپ پاسخ روی مانیتور سریال
+    }
+    Serial.println("       command   :   AT+CMGF=1");
     break;
 
   case SMS_SEND_HEADER:
@@ -796,6 +829,12 @@ void SmsSender()
       smsState = SMS_SEND_BODY;
       smsTimer = millis();
     }
+    TaskDelay(100); // کمی صبر برای دریافت پاسخ
+    while (SIM808.available())
+    {
+      Serial.write(SIM808.read()); // چاپ پاسخ روی مانیتور سریال
+    }
+    Serial.println("       command   :   AT+CMGS=\"");
     break;
 
   case SMS_SEND_BODY:
@@ -805,6 +844,12 @@ void SmsSender()
       smsState = SMS_SEND_CTRLZ;
       smsTimer = millis();
     }
+    TaskDelay(100); // کمی صبر برای دریافت پاسخ
+    while (SIM808.available())
+    {
+      Serial.write(SIM808.read()); // چاپ پاسخ روی مانیتور سریال
+    }
+    Serial.println("       command   :   " + currentMessage.text);
     break;
 
   case SMS_SEND_CTRLZ:
@@ -814,6 +859,12 @@ void SmsSender()
       smsState = SMS_WAIT_RESPONSE;
       smsTimer = millis();
     }
+    TaskDelay(100); // کمی صبر برای دریافت پاسخ
+    while (SIM808.available())
+    {
+      Serial.write(SIM808.read()); // چاپ پاسخ روی مانیتور سریال
+    }
+    Serial.println("       command   :  26");
     break;
 
   case SMS_WAIT_RESPONSE:
@@ -826,6 +877,8 @@ void SmsSender()
       smsState = SMS_IDLE;
       currentPriority = -1;
     }
+
+    Serial.println("       command   :   finish");
     break;
   }
 }
@@ -957,8 +1010,13 @@ String ReportSmsTextGenerator(String senderNumber, String msg)
 
 bool enqueueSms(String number, String text, int priority)
 {
+
+  Serial.println(" enqueueSms ====>>>>>  number :  " + number + "  text:  " + text + "  priority:  " + priority);
   if (priority < 0 || priority > 2)
+  {
+    Serial.println(" bad priority ......   priority:  " + priority);
     return false;
+  }
 
   int nextTail = (smsQueueTail[priority] + 1) % SMS_QUEUE_SIZE;
 
@@ -1406,7 +1464,7 @@ void setup()
 
 #pragma endregion
 
-  SetPublicVariables();
+  SetPublicVariablesFromPrefs();
 
   StartSoftAP();
 
@@ -1419,8 +1477,6 @@ void setup()
 
 void loop()
 {
-  unsigned long currentTime = epochStartTime + StartTime;
-
   monitorInputSms();
   monitorInputSmsStateMachine(); // دریافت پیامک بدون بلاک شدن
   processIncomingSmsQueue();     // پردازش پیامک‌ها با تأخیر

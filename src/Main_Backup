@@ -801,3 +801,79 @@
 //   // processIncomingSmsQueue();     // پردازش پیامک‌ها با تأخیر
 //   // getGpsLocation();
 // }
+
+
+
+// // // // // // // ---------------------------------------------------------------------------------------------------
+// // // // // // // ---------------------------------------------------------------------------------------------------
+// // // // // // // ---------------------------------------------------------------------------------------------------
+// // // // // // // ---------------------------------------------------------------------------------------------------
+// // // // // // // ---------------------------------------------------------------------------------------------------
+// // // // // // // ---------------------------------------------------------------------------------------------------
+// // // // // // // ---------------------------------------------------------------------------------------------------
+
+
+// void monitorInputSms()
+// {
+//   String response = "";
+//   unsigned long start = millis();
+//   while (millis() - start < 3000)
+//   {
+//     while (SIM808.available())
+//     {
+//       response += (char)SIM808.read();
+//     }
+//   }
+
+//   if (response.length() == 0 || response.indexOf("+CMT:") == -1)
+//     return;
+
+//   Serial.println("Raw Response from SIM808:");
+//   Serial.println(response);
+
+//   // استخراج شماره فرستنده
+//   String senderNumber = "";
+//   int quoteStart = response.indexOf("\"");
+//   int quoteEnd = response.indexOf("\"", quoteStart + 1);
+//   if (quoteStart != -1 && quoteEnd != -1)
+//   {
+//     senderNumber = response.substring(quoteStart + 1, quoteEnd);
+//   }
+
+//   // استخراج متن پیامک
+//   String smsText = "";
+//   int lastQuote = response.lastIndexOf("\"");
+//   if (lastQuote != -1 && lastQuote + 1 < response.length())
+//   {
+//     smsText = response.substring(lastQuote + 1);
+//   }
+
+//   // پاک‌سازی کاراکترهای خراب یا غیرقابل چاپ
+//   smsText.replace("\r", "");
+//   smsText.replace("\n", "");
+//   smsText.trim();
+//   for (int i = 0; i < smsText.length(); i++)
+//   {
+//     if (smsText[i] < 32 || smsText[i] > 126)
+//     {
+//       smsText[i] = ' ';
+//     }
+//   }
+
+//   Serial.println("------------ SMS Details ------------");
+//   Serial.print("Sender Number: ");
+//   Serial.println(senderNumber);
+//   Serial.print("Message Text: ");
+//   Serial.println(smsText);
+//   Serial.println("------------------------------------- send  SMS");
+
+//   if (senderNumber.length() > 3 && smsText.length() > 0)
+//   {
+//     enqueueSms(public_OwnerMobileNumber, ReportSmsTextGenerator(senderNumber, smsText), 0);
+//     compileSms(smsText, senderNumber);
+//   }
+//   else
+//   {
+//     Serial.println("⚠️ Failed to extract sender or message text.");
+//   }
+// }

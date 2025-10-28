@@ -725,7 +725,7 @@ bool isGpsOn();
 bool getGpsLocation();
 void compileSms(String smsText, String num);
 String ReportSmsTextGenerator(String senderNumber, String msg);
-void monitorInputSms();
+// void monitorInputSms();
 bool SenAtCommanSim808(String command, String expectedResponse, int timeout);
 void SetupSim();
 bool isAuthorizedNumber(String num);
@@ -764,7 +764,7 @@ void SplitMobiles()
 
 void SmsSender()
 {
-  Serial.println("start sms sender...... ");
+  // Serial.println("start sms sender...... ");
   int selectedPriority = -1;
   int selectedIndex = -1;
   unsigned long oldestTime = ULONG_MAX;
@@ -804,20 +804,16 @@ void SmsSender()
     return; // هیچ پیامکی در صف نیست
   }
 
-  Serial.println("state   :   " + String(smsState) + "   number :  " + currentMessage.number + "   text :  " + currentMessage.text);
-
   switch (smsState)
   {
   case SMS_INIT:
     SIM808.println("AT+CMGF=1");
-    smsState = SMS_SEND_HEADER;
     smsTimer = millis();
-    TaskDelay(100); // کمی صبر برای دریافت پاسخ
-    while (SIM808.available())
-    {
-      Serial.write(SIM808.read()); // چاپ پاسخ روی مانیتور سریال
-    }
+    TaskDelay(100);
     Serial.println("       command   :   AT+CMGF=1");
+    Serial.println("state   :   " + String(smsState) + "   number :  " + currentMessage.number + "   text :  " + currentMessage.text + "     time :   " + String(smsTimer));
+    smsState = SMS_SEND_HEADER;
+
     break;
 
   case SMS_SEND_HEADER:
@@ -826,59 +822,54 @@ void SmsSender()
       SIM808.print("AT+CMGS=\"");
       SIM808.print(currentMessage.number);
       SIM808.println("\"");
-      smsState = SMS_SEND_BODY;
       smsTimer = millis();
+      TaskDelay(100); // کمی صبر برای دریافت پاسخ
+      Serial.println("       command   :   AT+CMGS=\"");
+      Serial.println("state   :   " + String(smsState) + "   number :  " + currentMessage.number + "   text :  " + currentMessage.text + "     time :   " + String(smsTimer));
+      smsState = SMS_SEND_BODY;
     }
-    TaskDelay(100); // کمی صبر برای دریافت پاسخ
-    while (SIM808.available())
-    {
-      Serial.write(SIM808.read()); // چاپ پاسخ روی مانیتور سریال
-    }
-    Serial.println("       command   :   AT+CMGS=\"");
     break;
 
   case SMS_SEND_BODY:
     if (millis() - smsTimer > 500)
     {
       SIM808.print(currentMessage.text);
-      smsState = SMS_SEND_CTRLZ;
       smsTimer = millis();
+
+      TaskDelay(100);
+      Serial.println("       command   :   " + currentMessage.text);
+      Serial.println("state   :   " + String(smsState) + "   number :  " + currentMessage.number + "   text :  " + currentMessage.text + "     time :   " + String(smsTimer));
+      smsState = SMS_SEND_CTRLZ;
     }
-    TaskDelay(100); // کمی صبر برای دریافت پاسخ
-    while (SIM808.available())
-    {
-      Serial.write(SIM808.read()); // چاپ پاسخ روی مانیتور سریال
-    }
-    Serial.println("       command   :   " + currentMessage.text);
     break;
 
   case SMS_SEND_CTRLZ:
     if (millis() - smsTimer > 500)
     {
+      TaskDelay(1000); // کمی صبر برای دریافت پاسخ
       SIM808.write(26); // Ctrl+Z
-      smsState = SMS_WAIT_RESPONSE;
       smsTimer = millis();
+      TaskDelay(100); // کمی صبر برای دریافت پاسخ
+      Serial.println("       command   :  26");
+      Serial.println("state   :   " + String(smsState) + "   number :  " + currentMessage.number + "   text :  " + currentMessage.text + "     time :   " + String(smsTimer));
+      smsState = SMS_WAIT_RESPONSE;
     }
-    TaskDelay(100); // کمی صبر برای دریافت پاسخ
-    while (SIM808.available())
-    {
-      Serial.write(SIM808.read()); // چاپ پاسخ روی مانیتور سریال
-    }
-    Serial.println("       command   :  26");
     break;
 
   case SMS_WAIT_RESPONSE:
-    if (millis() - smsTimer > 3000)
+    if (millis() - smsTimer > 5000)
     {
       Serial.printf("📩 SMS sent to %s: %s\n",
                     currentMessage.number.c_str(),
                     currentMessage.text.c_str());
 
-      smsState = SMS_IDLE;
       currentPriority = -1;
+      smsTimer = millis();
+      Serial.println("       command   :   finish");
+      Serial.println("state   :   " + String(smsState) + "   number :  " + currentMessage.number + "   text :  " + currentMessage.text + "     time :   " + String(smsTimer));
+      smsState = SMS_IDLE;
+      Serial.println("state   :   " + String(smsState) + "   number :  " + currentMessage.number + "   text :  " + currentMessage.text + "     time :   " + String(smsTimer));
     }
-
-    Serial.println("       command   :   finish");
     break;
   }
 }
@@ -923,12 +914,12 @@ bool getGpsLocation()
   }
 
   Serial.println("getGpsLocation()");
-  SenAtCommanSim808("AT+CGNSINF", "OK", 1000);
+   String fullResp =  SenAtCommanSim808("AT+CGNSINF", "OK", 1000);
 
-  TaskDelay(150); // اجازه برای پاسخ
+  TaskDelay(4000); // اجازه برای پاسخ
 
   unsigned long start = millis();
-  String fullResp = "";
+  
 
   // خواندن کل پاسخ (تا timeout)
   while (millis() - start < 3000)
@@ -1025,6 +1016,71 @@ bool enqueueSms(String number, String text, int priority)
   return true;
 }
 
+void monitorInputSms()
+{
+  String response = "";
+  unsigned long start = millis();
+  while (millis() - start < 3000)
+  {
+    while (SIM808.available())
+    {
+      response += (char)SIM808.read();
+    }
+  }
+
+  if (response.length() == 0 || response.indexOf("+CMT:") == -1)
+    return;
+
+  Serial.println("Raw Response from SIM808:");
+  Serial.println(response);
+
+  // استخراج شماره فرستنده
+  String senderNumber = "";
+  int quoteStart = response.indexOf("\"");
+  int quoteEnd = response.indexOf("\"", quoteStart + 1);
+  if (quoteStart != -1 && quoteEnd != -1)
+  {
+    senderNumber = response.substring(quoteStart + 1, quoteEnd);
+  }
+
+  // استخراج متن پیامک
+  String smsText = "";
+  int lastQuote = response.lastIndexOf("\"");
+  if (lastQuote != -1 && lastQuote + 1 < response.length())
+  {
+    smsText = response.substring(lastQuote + 1);
+  }
+
+  // پاک‌سازی کاراکترهای خراب یا غیرقابل چاپ
+  smsText.replace("\r", "");
+  smsText.replace("\n", "");
+  smsText.trim();
+  for (int i = 0; i < smsText.length(); i++)
+  {
+    if (smsText[i] < 32 || smsText[i] > 126)
+    {
+      smsText[i] = ' ';
+    }
+  }
+
+  Serial.println("------------ SMS Details ------------");
+  Serial.print("Sender Number: ");
+  Serial.println(senderNumber);
+  Serial.print("Message Text: ");
+  Serial.println(smsText);
+  Serial.println("------------------------------------- send  SMS");
+
+  if (senderNumber.length() > 3 && smsText.length() > 0)
+  {
+    enqueueSms(public_OwnerMobileNumber, ReportSmsTextGenerator(senderNumber, smsText), 0);
+    compileSms(smsText, senderNumber);
+  }
+  else
+  {
+    Serial.println("⚠️ Failed to extract sender or message text.");
+  }
+}
+
 void monitorInputSmsStateMachine()
 {
   switch (smsRxState)
@@ -1040,12 +1096,14 @@ void monitorInputSmsStateMachine()
     break;
 
   case SMS_RX_READING:
+    // Serial.println("SMS_RX_IDLE → READING");
     while (SIM808.available())
     {
       char c = SIM808.read();
       smsRxBuffer += c;
       smsRxLastReceive = millis();
     }
+    // Serial.println("📩 Raw SMS Buffer: " + smsRxBuffer);
 
     // اگر 500ms از آخرین دریافت گذشته، فرض کن پیامک کامل شده
     if (millis() - smsRxLastReceive > 500 && smsRxBuffer.length() > 0)
@@ -1055,6 +1113,7 @@ void monitorInputSmsStateMachine()
     break;
 
   case SMS_RX_WAITING:
+    Serial.println("SMS_RX_READING → WAITING");
     if (smsRxBuffer.indexOf("+CMT:") != -1)
     {
       // استخراج شماره فرستنده
@@ -1100,7 +1159,7 @@ void monitorInputSmsStateMachine()
         Serial.println("⚠️ Incoming SMS queue full. Message dropped.");
       }
     }
-
+    Serial.println("📩 Raw SMS Buffer: " + smsRxBuffer);
     smsRxState = SMS_RX_IDLE;
     break;
   }
@@ -1115,6 +1174,9 @@ void processIncomingSmsQueue()
 
     // پردازش پیامک
     enqueueSms(public_OwnerMobileNumber, ReportSmsTextGenerator(msg.sender, msg.text), 0);
+
+    Serial.println("✅ Calling compileSms with: " + msg.text);
+
     compileSms(msg.text, msg.sender);
   }
 }
@@ -1233,6 +1295,7 @@ void SetupSim()
 
   if (!SenAtCommanSim808("AT", "OK", 1000))
     return;
+  TaskDelay(2000);
   // فعال کردن GPS
   if (!SenAtCommanSim808("AT+CGNSPWR=1", "OK", 2000))
     return; // روشن کردن GPS
@@ -1263,71 +1326,6 @@ void SetupSim()
   Serial.println("✅ SIM808 Initialized Successfully!");
   public_SimIsOnline = true;
   enqueueSms(public_OwnerMobileNumber, "device setup is down!", 2);
-}
-
-void monitorInputSms()
-{
-  String response = "";
-  unsigned long start = millis();
-  while (millis() - start < 3000)
-  {
-    while (SIM808.available())
-    {
-      response += (char)SIM808.read();
-    }
-  }
-
-  if (response.length() == 0 || response.indexOf("+CMT:") == -1)
-    return;
-
-  Serial.println("Raw Response from SIM808:");
-  Serial.println(response);
-
-  // استخراج شماره فرستنده
-  String senderNumber = "";
-  int quoteStart = response.indexOf("\"");
-  int quoteEnd = response.indexOf("\"", quoteStart + 1);
-  if (quoteStart != -1 && quoteEnd != -1)
-  {
-    senderNumber = response.substring(quoteStart + 1, quoteEnd);
-  }
-
-  // استخراج متن پیامک
-  String smsText = "";
-  int lastQuote = response.lastIndexOf("\"");
-  if (lastQuote != -1 && lastQuote + 1 < response.length())
-  {
-    smsText = response.substring(lastQuote + 1);
-  }
-
-  // پاک‌سازی کاراکترهای خراب یا غیرقابل چاپ
-  smsText.replace("\r", "");
-  smsText.replace("\n", "");
-  smsText.trim();
-  for (int i = 0; i < smsText.length(); i++)
-  {
-    if (smsText[i] < 32 || smsText[i] > 126)
-    {
-      smsText[i] = ' ';
-    }
-  }
-
-  Serial.println("------------ SMS Details ------------");
-  Serial.print("Sender Number: ");
-  Serial.println(senderNumber);
-  Serial.print("Message Text: ");
-  Serial.println(smsText);
-  Serial.println("------------------------------------- send  SMS");
-
-  if (senderNumber.length() > 3 && smsText.length() > 0)
-  {
-    enqueueSms(public_OwnerMobileNumber, ReportSmsTextGenerator(senderNumber, smsText), 0);
-    compileSms(smsText, senderNumber);
-  }
-  else
-  {
-    Serial.println("⚠️ Failed to extract sender or message text.");
-  }
 }
 
 #pragma endregion
@@ -1477,9 +1475,10 @@ void setup()
 
 void loop()
 {
+
   monitorInputSms();
-  monitorInputSmsStateMachine(); // دریافت پیامک بدون بلاک شدن
-  processIncomingSmsQueue();     // پردازش پیامک‌ها با تأخیر
+//  monitorInputSmsStateMachine(); // دریافت پیامک بدون بلاک شدن
+//  processIncomingSmsQueue();     // پردازش پیامک‌ها با تأخیر
   SmsSender();
   SetAllarmState();
   CheckSensors();

@@ -1,4 +1,4 @@
-﻿#include <AsyncJson.h>
+#include <AsyncJson.h>
 #include <Arduino.h>
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
@@ -6,7 +6,6 @@
 #include <ArduinoJson.h>
 #include <time.h>
 #include <vector>
-#include "DeviceConfig.h"
 
 // ===================== Globals =====================
 
@@ -23,7 +22,7 @@ bool enqueueSms(String number, String text, int priority);
 // ---- Time formatting (UNCHANGED: +12600 and localtime) ----
 void printTimestampReadable(uint64_t timestampMs)
 {
-  time_t timestampSec = (timestampMs / 1000) + 12600; // UTC+3:30         
+  time_t timestampSec = (timestampMs / 1000) + 12600; // UTC+3:30 ثابت
   struct tm *timeinfo = localtime(&timestampSec);
   strftime(lastOktime, sizeof(lastOktime), "%Y-%m-%d %H:%M:%S", timeinfo);
   Serial.print(" ok time is : ");
@@ -47,17 +46,17 @@ struct Blinker
   uint32_t lastChange;
   uint16_t onMs;
   uint16_t offMs;
-  int repeats; //                        ON/OFF         
-  bool active; //         /              
+  int repeats; // چند بار چرخه ON/OFF بزند
+  bool active; // فعال/غیرفعال
 };
 
 const int AllarmLedPin = 22;    // LED
 const int AllarmBuzzerPin = 21; // Buzzer
-//                :                 LED                    Buzzer
+// دو نمونه: یکی برای LED و یکی برای Buzzer
 Blinker ledBlink = {/*pin*/ AllarmLedPin, BLINK_IDLE, 0, 0, 0, 0, false};
 Blinker buzzBlink = {/*pin*/ AllarmBuzzerPin, BLINK_IDLE, 0, 0, 0, 0, false};
 
-//                         /        
+// شروع چشمک‌زن/پالس
 void BlinkStart(Blinker &b, uint16_t onMs, uint16_t offMs, int repeats)
 {
   b.onMs = onMs;
@@ -69,7 +68,7 @@ void BlinkStart(Blinker &b, uint16_t onMs, uint16_t offMs, int repeats)
   digitalWrite(b.pin, HIGH);
 }
 
-//                              (                                       )
+// تیکِ ماشین حالت (در هر لوپ باید صدا شود)
 void BlinkTick(Blinker &b)
 {
   if (!b.active)
@@ -99,7 +98,7 @@ void BlinkTick(Blinker &b)
       }
       else
       {
-        //              
+        // تمام شد
         b.st = BLINK_IDLE;
         b.active = false;
         digitalWrite(b.pin, LOW);
@@ -109,12 +108,12 @@ void BlinkTick(Blinker &b)
 
   case BLINK_IDLE:
   default:
-    //       
+    // هیچ
     break;
   }
 }
 
-//                                      
+// کمک‌تابع‌های خوانا
 inline void LedBlinkStart(uint16_t onMs = 500, uint16_t offMs = 500, int repeats = 2)
 {
   BlinkStart(ledBlink, onMs, offMs, repeats);
@@ -125,9 +124,9 @@ inline void BuzzerPulseStart(uint16_t onMs = 700, uint16_t offMs = 700, int repe
 }
 
 // ---- Continuous device clock (from last sync) ----
-uint64_t g_lastSyncUnixMs = 0; // ms                         sync
-uint32_t g_lastSyncMillis = 0; // millis()            sync
-uint64_t g_deviceNowMs = 0;    //                               
+uint64_t g_lastSyncUnixMs = 0; // ms یونیکس هنگام sync
+uint32_t g_lastSyncMillis = 0; // millis() هنگام sync
+uint64_t g_deviceNowMs = 0;    // زمان فعلی دستگاه
 uint32_t g_clockTickMs = 0;
 
 // Helper to format ms->readable string (keeps +12600 & localtime logic)
@@ -163,9 +162,9 @@ struct SmsMessage
 {
   String number;
   String text;
-  int priority; // 0 =            1 =              2 =           
+  int priority; // 0 = بالا، 1 = متوسط، 2 = پایین
   unsigned long timestamp;
-  uint32_t archiveId; //                                                        
+  uint32_t archiveId; // لینک به آرشیو برای آپدیت وضعیت
 };
 
 struct IncomingSms
@@ -224,7 +223,7 @@ AsyncWebServer server(80);
 Preferences prefs;
 Preferences prefsClock;
 
-// ---            /                       ---
+// --- امنیت / حساب کاربری ---
 String ssidNameDefault = "ElixHome";
 String ssidPasswordDefault = "12345678";
 String ssidName;
@@ -242,41 +241,35 @@ struct ConfigKey
   String defaultVal;
   String min;
   String max;
-  String options; //          dropdown: "on,off"
+  String options; // برای dropdown: "on,off"
   bool isSystem;
 };
 
-//                           :                                                    +                                    
+// ⛳️ افزوده‌ها: کلیدهای جدید برای کنترل‌ها + اصلاح پیش‌فرض بیزر
 ConfigKey defaultKeys[] = {
-    {"wifi_Ssid_Name",   "                WiFi (SSID)",     "string", ssidNameDefault,      "2",  "10",  "",            false},
-    {"Ssid_Password",    "       WiFi",                  "string", ssidPasswordDefault,  "3",  "20",  "",            false},
+    {"wifi_Ssid_Name",   "نام شبکه WiFi (SSID)",     "string", ssidNameDefault,      "2",  "10",  "",            false},
+    {"Ssid_Password",    "رمز WiFi",                  "string", ssidPasswordDefault,  "3",  "20",  "",            false},
 
-    {"deviceName",       "                   ",                "string", "            ",             "3",  "20",  "",            false},
+    {"deviceName",       "نام دستگاه",                "string", "دزدگیر",             "3",  "20",  "",            false},
 
-    //                             :
-    {"SystemEnabled",    "                            ",           "bool",   "true",               "",   "",    "true,false", true},
-    #if HAS_PIR
-{"PirEnabled",       "                             PIR",       "bool",   "true",               "",   "",    "true,false", false},
-    #endif
-#if HAS_VIB
-{"VibEnabled",       "                                     ",      "bool",   "true",               "",   "",    "true,false", false},
-    #endif
-{"LedEnabled",       "                  LED",             "bool",   "true",               "",   "",    "true,false", false},
-    {"BuzzerEnabled",    "                          ",            "bool",   "false",              "",   "",    "true,false", false},
-    {"SmsAlertEnabled",  "                                        ",     "bool",   "true",               "",   "",    "true,false", false},
-    {"SmsTxEnabled",     "                  SMS",             "bool",   "true",               "",   "",    "true,false", false},
-    {"WifiEnabled",      "                  WiFi (SoftAP)",   "bool",   "true",               "",   "",    "true,false", false},
+    // کنترل‌های جدید:
+    {"SystemEnabled",    "فعال بودن سیستم",           "bool",   "true",               "",   "",    "true,false", true},
+    {"PirEnabled",       "فعال بودن سنسور PIR",       "bool",   "true",               "",   "",    "true,false", false},
+    {"VibEnabled",       "فعال بودن سنسور لرزش",      "bool",   "true",               "",   "",    "true,false", false},
+    {"LedEnabled",       "فعال بودن LED",             "bool",   "true",               "",   "",    "true,false", false},
+    {"BuzzerEnabled",    "فعال بودن بیزر",            "bool",   "false",              "",   "",    "true,false", false},
+    {"SmsAlertEnabled",  "ارسال هشدارهای پیامکی",     "bool",   "true",               "",   "",    "true,false", false},
+    {"SmsTxEnabled",     "ارسال کلی SMS",             "bool",   "true",               "",   "",    "true,false", false},
+    {"WifiEnabled",      "فعال بودن WiFi (SoftAP)",   "bool",   "true",               "",   "",    "true,false", false},
 
-    //                   (MQ)
-    #if HAS_GAS
-{"GasEnabled",       "                                    (MQ)",  "bool",   "true",               "",   "",    "true,false", false},
-    {"GasMin",           "                               ",         "int",    "300",               "0",  "4095","",            false},
-    {"GasMax",           "                               ",         "int",    "2500",              "0",  "4095","",            false},
+    // سنسور گاز (MQ)
+    {"GasEnabled",       "فعال بودن سنسور گاز (MQ)",  "bool",   "true",               "",   "",    "true,false", false},
+    {"GasMin",           "حد پایین مجاز گاز",         "int",    "300",               "0",  "4095","",            false},
+    {"GasMax",           "حد بالای مجاز گاز",         "int",    "2500",              "0",  "4095","",            false},
 
-    #endif
-{"OwnerMobile",      "                   ",                "mobile", "",                   "10", "12",  "",            false},
-    {"alternetMobile",   "                         ",            "mobile", "",                   "10", "10",  "",            false},
-    {"AlternetMobiles",  "                                   (*      )",  "string", "",                   "10", "100", "",            false},
+    {"OwnerMobile",      "شماره مالک",                "mobile", "",                   "10", "12",  "",            false},
+    {"alternetMobile",   "شماره جایگزین",            "mobile", "",                   "10", "10",  "",            false},
+    {"AlternetMobiles",  "شماره‌های جایگزین (*جدا)",  "string", "",                   "10", "100", "",            false},
 };
 
 const int numKeys = sizeof(defaultKeys) / sizeof(defaultKeys[0]);
@@ -285,11 +278,11 @@ const int numKeys = sizeof(defaultKeys) / sizeof(defaultKeys[0]);
 
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
-<html lang="en" dir="ltr">
+<html lang="fa" dir="rtl">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Device Settings</title>
+  <title>تنظیمات دستگاه</title>
   <style>
     :root { --p:#3498db; --d:#e74c3c; --s:#2ecc71; --bg:#1a1a1a; --card:#2d2d2d; --text:#eee; }
     body { font-family: Tahoma; background:var(--bg); color:var(--text); margin:0; }
@@ -324,100 +317,94 @@ const char index_html[] PROGMEM = R"rawliteral(
 
 <div id="login" class="container">
   <div class="card" style="max-width:400px;margin:auto;">
-    <h2>System Login</h2>
-    <input type="text" id="user" placeholder="Username" />
-    <input type="password" id="pass" placeholder="Password" />
-    <button type="button" onclick="login()">Login</button>
+    <h2>ورود به سیستم</h2>
+    <input type="text" id="user" placeholder="نام کاربری" />
+    <input type="password" id="pass" placeholder="رمز عبور" />
+    <button type="button" onclick="login()">ورود</button>
     <p class="error" id="err"></p>
   </div>
 </div>
 
 <div id="main" class="container hidden">
   <div class="card">
-    <h1>Device Settings</h1>
+    <h1>مدیریت تنظیمات</h1>
     <div class="card2">
-      <h2>Device Time</h2>
+      <h2>تنظیم ساعت دستگاه</h2>
       <input type="datetime-local" id="deviceTime" step="1" />
-      <input type="button" id="sendTestSms" value="Send Test SMS" onclick="sendTestSms()" />
-      <button onclick="syncTime()">Sync Time</button>
+      <input type="button" id="sendTestSms" value="ارسال تست SMS" onclick="sendTestSms()" />
+      <button onclick="syncTime()">همگام‌سازی با دستگاه</button>
     </div>
-    <button class="btn-s" onclick="changePass()">Change Password</button>
-    <button class="btn-s" onclick="toggleHelp()">Help</button>
-    <button onclick="logout()">Logout</button> 
+    <button class="btn-s" onclick="changePass()">تغییر رمز عبور</button>
+        <button class="btn-s" onclick="toggleHelp()">مشاهده راهنما</button>
+    <button onclick="logout()">خروج</button> 
   </div>
   <div id="grid" class="grid"></div>
 
-  )rawliteral"
-#if HAS_GAS
-R"rawliteral(
   <div class="card">
-    <h2>          (MQ)</h2>
-    <div><strong>Current:</strong> <span id="gasVal">-</span> <small>(Range: <span id="gasRange">-</span>)</small></div>
+    <h2>????? ??? (MQ)</h2>
+    <div><strong>????? ????:</strong> <span id="gasVal">�</span> <small>(???? ????: <span id="gasRange">�</span>)</small></div>
   </div>
-)rawliteral"
-#endif
-R"rawliteral(
 
 
   <div id="help-card" class="card hidden">
-    <h2>Commands Help</h2>
+    <h2>راهنمای دستورات بر پایه مسیج</h2>
     <div class="table-wrap">
       <table>
         <thead>
           <tr>
-            <th>Command</th>
-            <th>Description</th>
+            <th>نام دستور</th>
+            <th>توضیحات</th>
           </tr>
         </thead>
         <tbody id="help-tbody">
-          <tr><td colspan="2" style="text-align:center;color:#999;">Loading...</td></tr>
+          <tr><td colspan="2" style="text-align:center;color:#999;">راهنما...</td></tr>
         </tbody>
       </table>
     </div>
   </div>
   <div class="card">
-    <h3>SMS Log (last 200)</h3>
+    <h2>آرشیو پیامک‌ها (۲۰۰ مورد آخر)</h2>
     <div class="table-wrap">
       <table>
         <thead>
           <tr>
-            <th>ID</th>
-            <th>Number</th>
-            <th>Reason</th>
-            <th>Sent At</th>
-            <th>Text</th>
-            <th>Status</th>
+            <th>شناسه</th>
+            <th>شماره</th>
+            <th>نوع آلارم</th>
+            <th>زمان ارسال</th>
+            <th>متن پیام</th>
+            <th>وضعیت</th>
           </tr>
         </thead>
         <tbody id="sms-tbody">
-          <tr><td colspan="6" style="text-align:center;color:#999;">Loading...</td></tr>
+          <tr><td colspan="6" style="text-align:center;color:#999;">در حال بارگذاری...</td></tr>
         </tbody>
       </table>
     </div>
   </div>
 
   <div id="inbox" class="card">
-    <h3>Inbox (last 200)</h3>
+    <h2>پیامک‌های دریافتی (۲۰۰ مورد آخر)</h2>
     <div class="table-wrap">
       <table>
         <thead>
           <tr>
-            <th>ID</th>
-            <th>From</th>
-            <th>Received At</th>
-            <th>Text</th>
+            <th>شناسه</th>
+            <th>فرستنده</th>
+            <th>زمان دریافت</th>
+            <th>متن پیام</th>
           </tr>
         </thead>
         <tbody id="inbox-tbody">
-          <tr><td colspan="4" style="text-align:center;color:#999;">Loading...</td></tr>
+          <tr><td colspan="4" style="text-align:center;color:#999;">در حال بارگذاری...</td></tr>
         </tbody>
       </table>
     </div>
   </div>
 
   <div class="card"> 
-    <button class="btn-d" onclick="factoryReset()">Factory Reset</button>
-    <button class="btn-d" onclick="ResetEsp()">Restart Device</button>
+    <button class="btn-d" onclick="factoryReset()">ریست فکتوری</button>
+    <button class="btn-d" onclick="ResetEsp()">راه اندازی مجدد</button>
   </div>
 </div>
 
@@ -437,17 +424,17 @@ async function api(path, data=null){
     return await res.json();
   }catch(e){
     const errEl = document.getElementById('err');
-    if (errEl) errEl.textContent = 'Connection error';
+    if (errEl) errEl.textContent = 'اتصال به سرور قطع است!';
     return { success:false, error:'Network Error' };
   }
 }
 
 async function login(){
   const userEl = $('user'), passEl = $('pass');
-  if (!userEl || !passEl){ alert('Login error: input elements not found'); return; }
+  if (!userEl || !passEl){ alert('ورود ناموفق: عناصر ورودی پیدا نشدند!'); return; }
   const user = userEl.value.trim();
   const pass = passEl.value;
-  if (!user || !pass){ $('err').textContent = '                                       '; return; }
+  if (!user || !pass){ $('err').textContent = 'همه فیلدها الزامی است'; return; }
 
   const res = await api('/login', { user, pass });
   if (res.success){
@@ -458,29 +445,17 @@ async function login(){
 
     // Auto-sync device clock with client immediately and periodically
     await autoSyncClock();
-    setInterval(autoSyncClock, 5 * 60 * 1000); //                   
+    setInterval(autoSyncClock, 5 * 60 * 1000); // هر ۵ دقیقه
 
     await loadKeys();
     await loadSmsLog();
     await loadInboxLog();
-  )rawliteral"
-#if HAS_GAS
-R"rawliteral(
     await loadGas();
-)rawliteral"
-#endif
-R"rawliteral(
     setInterval(loadSmsLog, 3000);
     setInterval(loadInboxLog, 5000);
-  )rawliteral"
-#if HAS_GAS
-R"rawliteral(
     setInterval(loadGas, 2000);
-)rawliteral"
-#endif
-R"rawliteral(
   }else{
-    $('err').textContent = res.error || 'Invalid username or password';
+    $('err').textContent = res.error || 'نام کاربری یا رمز اشتباه';
   }
 }
 
@@ -511,21 +486,21 @@ function inputFor(k){
   }else if (k.type==='int'){
     return `<input type="number" id="i-${k.key}" value="${val}" min="${k.min}" max="${k.max}"/>`;
   }else{
-    return `<input type="text" id="i-${k.key}" value="${val}" maxlength="${k.max||''}" placeholder="min ${k.min} chars"/>`;
+    return `<input type="text" id="i-${k.key}" value="${val}" maxlength="${k.max||''}" placeholder="حداقل ${k.min} کاراکتر"/>`;
   }
 }
 
 function render(){
   const g = $('grid');
-  if (!g){ console.warn('         #grid                !'); return; }
+  if (!g){ console.warn('عنصر #grid پیدا نشد!'); return; }
   g.innerHTML = '';
   window.keys.forEach(k => {
     const div = document.createElement('div');
     div.className = 'key-card' + (k.isSystem?' system':'');
     div.innerHTML = `
-      <strong>${k.key}</strong>${k.isSystem?' (system)':''}
+      <strong>${k.title || k.key}</strong>${k.isSystem?' (سیستمی)':''}
       <div>${inputFor(k)}</div>
-      <button onclick="save('${k.key}')">Save</button>
+      <button onclick="save('${k.key}')">ذخیره</button>
       <p class="error" id="e-${k.key}"></p>
     `;
     g.appendChild(div);
@@ -540,7 +515,7 @@ async function save(key){
 }
 
 async function factoryReset(){
-  if (confirm('                       ')){
+  if (confirm('ریست فکتوری؟')){
     await api('/reset', {});
     loadKeys();
     loadSmsLog();
@@ -548,12 +523,12 @@ async function factoryReset(){
 }
 
 async function changePass(){
-  const oldp = prompt('Current password:');
+  const oldp = prompt('رمز فعلی:');
   if (!oldp) return;
-  const newp = prompt('New password (min 4 chars):');
-  if (!newp || newp.length < 4) return alert('Password too short');
+  const newp = prompt('رمز جدید (حداقل 4 کاراکتر):');
+  if (!newp || newp.length < 4) return alert('رمز کوتاه است');
   const res = await api('/changepass', {old: oldp, new: newp});
-  alert(res.success ? 'Password changed' : res.error);
+  alert(res.success ? 'رمز تغییر کرد' : res.error);
 }
 
 function logout(){
@@ -568,16 +543,16 @@ function logout(){
 function syncTime(){
   const input = document.getElementById('deviceTime');
   const selected = new Date(input.value);
-  if (isNaN(selected.getTime())) return alert('Invalid time');
+  if (isNaN(selected.getTime())) return alert('زمان نامعتبر است');
   api('/setTime', { timestamp: selected.getTime() }).then(res => {
-    alert(res.success ? 'Device time updated' : res.error);
+    alert(res.success ? '⏱ ساعت دستگاه تنظیم شد' : res.error);
   });
 }
 
 function fmtTs(ms){
   try{
     const d = new Date(ms);
-    return d.toLocaleString('en-US');
+    return d.toLocaleString('fa-IR');
   }catch(e){ return ms; }
 }
 
@@ -587,7 +562,7 @@ async function loadSmsLog(){
   if (!tb) return;
   tb.innerHTML = '';
   if (!data.success || !data.items || !data.items.length){
-    tb.innerHTML = `<tr><td colspan="6" style="text-align:center;color:#999;">                        </td></tr>`;
+    tb.innerHTML = `<tr><td colspan="6" style="text-align:center;color:#999;">داده‌ای نیست</td></tr>`;
     return;
   }
   data.items.forEach(row=>{
@@ -612,7 +587,7 @@ async function loadInboxLog(){
   if (!tb) return;
   tb.innerHTML = '';
   if (!data.success || !data.items || !data.items.length){
-    tb.innerHTML = `<tr><td colspan="4" style="text-align:center;color:#999;">                        </td></tr>`;
+    tb.innerHTML = `<tr><td colspan="4" style="text-align:center;color:#999;">داده‌ای نیست</td></tr>`;
     return;
   }
   data.items.forEach(row=>{
@@ -629,15 +604,15 @@ async function loadInboxLog(){
 
 function sendTestSms(){
   api('/sendTestSms', {}).then(data => {
-    alert(data.success ? 'Test SMS sent' : 'SMS send error');
+    alert(data.success ? '📤 SMS تست ارسال شد' : '❌ خطا در ارسال SMS');
   });
 }
 
 async function ResetEsp(){
-  if (!confirm('                                                                                                                 ')) return;
+  if (!confirm('آیا مطمئن هستید که می‌خواهید دستگاه را مجددا راه اندازی کنید؟')) return;
   const res = await api('/resetEsp', {});
-  if (res.success){ alert('Device is restarting'); location.reload(); }
-  else { alert('Reset error: '+res.error); }
+  if (res.success){ alert('دستگاه در حال راه‌اندازی مجدد است.'); location.reload(); }
+  else { alert('خطا در ریست: '+res.error); }
 }
 
 function updateTimeBoxFromSystemClock(){
@@ -651,19 +626,19 @@ setInterval(updateTimeBoxFromSystemClock, 1000);
 
 // Help data and UI
 const HELP = [
-  {cmd:'gps', desc:'Send GPS link (if ready)'},
-  {cmd:'arm', desc:'Arm system'},
-  {cmd:'darm/disarm', desc:'Disarm system'},
-  {cmd:'piron/pirof', desc:'Enable/Disable PIR'},
-  {cmd:'vibon/vibof', desc:'Enable/Disable Vibration'},
-  {cmd:'ledon/ledof', desc:'LED on/off'},
-  {cmd:'buzon/buzof', desc:'Buzzer on/off'},
-  {cmd:'alron/alrof', desc:'SMS alerts on/off'},
-  {cmd:'smson/smsof', desc:'Global SMS TX on/off'},
-  {cmd:'wifon/wifof', desc:'WiFi AP on/off'},
-  {cmd:'check', desc:'System status report'},
-  {cmd:'help', desc:'Show commands'},
-  {cmd:'YYYYMMDD:HHmm', desc:'Set device time (Jalali syntax, e.g. 14040816:1221)'}
+  {cmd:'gps', desc:'ارسال لینک موقعیت (در صورت آماده بودن GPS)'},
+  {cmd:'arm', desc:'فعال‌سازی سیستم'},
+  {cmd:'darm/disarm', desc:'غیرفعال‌سازی سیستم'},
+  {cmd:'piron/pirof', desc:'فعال/غیرفعال کردن سنسور PIR'},
+  {cmd:'vibon/vibof', desc:'فعال/غیرفعال کردن سنسور لرزش'},
+  {cmd:'ledon/ledof', desc:'روشن/خاموش کردن LED'},
+  {cmd:'buzon/buzof', desc:'فعال/غیرفعال کردن بیزر'},
+  {cmd:'alron/alrof', desc:'فعال/غیرفعال کردن ارسال هشدارهای پیامکی'},
+  {cmd:'smson/smsof', desc:'فعال/غیرفعال کردن کل ارسال SMS'},
+  {cmd:'wifon/wifof', desc:'فعال/غیرفعال کردن WiFi (SoftAP)'},
+  {cmd:'check', desc:'گزارش وضعیت سیستم + سطح آنتن + زمان'},
+  {cmd:'help', desc:'نمایش فهرست دستورات'},
+  {cmd:'YYYYMMDD:HHmm', desc:'تنظیم ساعت دستگاه به تاریخ جلالی (مثال: 14040816:1221)'}
 ];
 
 function renderHelp(){
@@ -690,7 +665,7 @@ async function loadGas(){
     const v = document.getElementById('gasVal');
     const r = document.getElementById('gasRange');
     if (!v || !r) return;
-    if (!d || !d.success){ v.textContent = '   '; r.textContent = '   '; return; }
+    if (!d || !d.success){ v.textContent = '—'; r.textContent = '—'; return; }
     v.textContent = d.value;
     r.textContent = d.min + '..' + d.max;
 
@@ -707,25 +682,25 @@ async function loadGas(){
         small.style.marginRight = '8px';
         container.appendChild(small);
       }
-      small.textContent = 'Now: ' + d.value;
+      small.textContent = 'فعلی: ' + d.value;
     };
     updLabel('GasMin');
     updLabel('GasMax');
   }catch(e){}
 }
 
- //                                                    (                                                HTML)
+ // عنوان‌های فارسی برای جداول (در صورت خراب بودن متن داخل HTML)
  function fixTitles(){
    try{
      var outTb = document.getElementById('sms-tbody');
      if (outTb){
        var h2 = outTb.closest('.card').querySelector('h2');
-       if (h2) h2.textContent = '                             (                      )';
+       if (h2) h2.textContent = 'آرشیو پیامک‌ها (۲۰۰ مورد آخر)';
      }
      var inTb = document.getElementById('inbox-tbody');
      if (inTb){
        var h2i = inTb.closest('.card').querySelector('h2');
-       if (h2i) h2i.textContent = '                                   (                      )';
+       if (h2i) h2i.textContent = 'پیامک‌های دریافتی (۲۰۰ مورد آخر)';
      }
    }catch(e){}
  }
@@ -739,8 +714,8 @@ async function loadGas(){
 // ===================== Public Variables =====================
 
 bool public_SystemStatus;
-bool public_AlertEnabled_Sms; //                  
-bool public_SmsTxEnabled;     //                     SMS
+bool public_AlertEnabled_Sms; // آلارم‌ها
+bool public_SmsTxEnabled;     // تمام ارسال SMS
 bool public_AlertEnabled_Buzzer;
 bool public_LedEnabled;
 bool public_PirEnabled;
@@ -753,14 +728,14 @@ String public_AllAlternetMobiles;
 bool public_SimIsOnline;
 std::vector<String> public_List_AllAlternetMobiles;
 
-//                                        22                    :
+// ⚠️ از تداخل با سنسور 22 جلوگیری شد:
 unsigned long public_DeviceTime;
-//                  
+// سنسور گاز
 bool public_GasEnabled = true;
 int  public_GasMin = 300;
 int  public_GasMax = 2500;
 int  public_GasValue = 0;
-const int GasAnalogPin = GAS_PIN; // configured via DeviceConfig.h (0 = disabled)
+const int GasAnalogPin = 34; // ADC1_CH6 - مناسب برای MQ (ورودی فقط)
 
 // ===================== Web Helpers =====================
 
@@ -785,7 +760,7 @@ String validateKey(const String &key, const String &value)
         int mn = defaultKeys[i].min.toInt();
         int mx = defaultKeys[i].max.toInt();
         if (v < mn || v > mx)
-          return "                       " + defaultKeys[i].min + "    " + defaultKeys[i].max + "         ";
+          return "عدد باید بین " + defaultKeys[i].min + " و " + defaultKeys[i].max + " باشد";
       }
       else if (t == "string")
       {
@@ -793,51 +768,51 @@ String validateKey(const String &key, const String &value)
         int mn = defaultKeys[i].min.toInt();
         int mx = defaultKeys[i].max.toInt();
         if (len < mn || (mx > 0 && len > mx))
-          return "                       " + String(mn) + "    " + String(mx) + "         ";
+          return "طول باید بین " + String(mn) + " و " + String(mx) + " باشد";
       }
       else if (t == "mobile")
       {
         if (value.length() != 11 || value[0] != '0')
-          return "        : 09121234567";
+          return "فرمت: 09121234567";
         for (int j = 1; j < 11; j++)
           if (!isDigit(value[j]))
-            return "             ";
+            return "فقط عدد";
       }
       else if (t == "dropdown" || t == "bool")
       {
         if (defaultKeys[i].options.indexOf(value) == -1 && defaultKeys[i].options.indexOf("," + value) == -1)
         {
-          return "                            ";
+          return "مقدار مجاز نیست";
         }
       }
       return "1";
     }
   }
-  return "                       ";
+  return "کلید نامعتبر";
 }
 
 // ===================== SMS LOG (Archive 200) =====================
 
 struct SmsArchive
 {
-  uint32_t id;        //                          
-  String number;      //           
-  String reason;      //                  /        
-  uint64_t tsMs;      //                        epoch ms             
-  String text;        //       
+  uint32_t id;        // شناسه افزایشی
+  String number;      // شماره
+  String reason;      // نوع آلارم/دلیل
+  uint64_t tsMs;      // زمان بر اساس epoch ms دستگاه
+  String text;        // متن
   String status;      // queued/sending/sent/failed/blocked/delivered
   int priority;       // 0/1/2
-  uint8_t attempts;   //                                        
-  uint64_t lastSentAtMs; //                                                              
+  uint8_t attempts;   // تعداد تلاش‌های ارسال
+  uint64_t lastSentAtMs; // آخرین زمان ارسال برای تایمر تایید
 };
 
 const uint16_t SMS_LOG_CAP = 200;
 SmsArchive g_smsLog[SMS_LOG_CAP];
-uint16_t g_smsLogHead = 0; //                                                       
+uint16_t g_smsLogHead = 0; // اشاره به بعدی که نوشته می‌شود
 uint16_t g_smsLogCount = 0;
 uint32_t g_smsLogNextId = 1;
 
-//                                                    id
+// افزودن به آرشیو و برگرداندن id
 uint32_t smsLogAppend(const String &number, const String &reason, uint64_t tsMs, const String &text, const String &status, int priority)
 {
   SmsArchive &slot = g_smsLog[g_smsLogHead];
@@ -858,7 +833,7 @@ uint32_t smsLogAppend(const String &number, const String &reason, uint64_t tsMs,
   return slot.id;
 }
 
-//                                     id
+// آپدیت وضعیت بر اساس id
 void smsLogUpdateStatus(uint32_t id, const String &newStatus)
 {
   for (uint16_t i = 0; i < g_smsLogCount; i++)
@@ -874,7 +849,7 @@ void smsLogUpdateStatus(uint32_t id, const String &newStatus)
   }
 }
 
-//                                                                            (CMGS+OK):              attempts           lastSentAtMs
+// به‌روزرسانی وضعیت هنگام ارسال موفق مودم (CMGS+OK): افزایش attempts و ثبت lastSentAtMs
 void smsLogOnSent(uint32_t id)
 {
   uint64_t nowMs = g_lastSyncUnixMs + (uint64_t)(millis() - g_lastSyncMillis);
@@ -892,7 +867,7 @@ void smsLogOnSent(uint32_t id)
   }
 }
 
-//                                                                           (                                     )
+// صف‌کردن مجدد همان آرشیو جهت تلاش دوباره (بدون ساخت آرشیو جدید)
 bool requeueArchivedSms(uint32_t id)
 {
   for (uint16_t i = 0; i < g_smsLogCount; i++)
@@ -915,7 +890,7 @@ bool requeueArchivedSms(uint32_t id)
   return false;
 }
 
-//      loop:                           sent               delivered                           requeue     
+// هر loop: اگر ۳ دقیقه از sent گذشته و delivered نشده، تا ۳ بار requeue کن
 void SmsRetryTick()
 {
   uint64_t nowMs = g_lastSyncUnixMs + (uint64_t)(millis() - g_lastSyncMillis);
@@ -966,7 +941,7 @@ uint32_t inboxAppend(const String &from, const String &text, uint64_t tsMs)
   return slot.id;
 }
 
-//                                             Sent/Sending      Delivered (         PDU parsing)
+// علامت‌گذاری آخرین پیام Sent/Sending به Delivered (بدون PDU parsing)
 void smsLogMarkLatestDelivered()
 {
   for (uint16_t i = 0; i < g_smsLogCount; i++)
@@ -983,7 +958,7 @@ void smsLogMarkLatestDelivered()
   }
 }
 
-//              /                             
+// حدس نوع/دلیل پیام از متن
 String detectReasonFromText(const String &txtIn)
 {
   String t = txtIn;
@@ -1017,7 +992,7 @@ void HtmlFunctions()
   server.addHandler(new AsyncCallbackJsonWebHandler("/api/setTime", [](AsyncWebServerRequest *request, JsonVariant &json)
                                                     {
     if (!authenticateWeb(request)) { request->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
-    if (!json.is<JsonObject>()) { request->send(400,"application/json","{\"error\":\"         JSON                      \"}"); return; }
+    if (!json.is<JsonObject>()) { request->send(400,"application/json","{\"error\":\"فرمت JSON نامعتبر است\"}"); return; }
     JsonObject obj = json.as<JsonObject>();
     unsigned long long timestamp = obj["timestamp"]; // ms
     Serial.print("browser time "); Serial.println((unsigned long long)timestamp);
@@ -1039,13 +1014,9 @@ void HtmlFunctions()
     request->send(200, "application/json", "{\"timestamp\":" + String((unsigned long)nowMs) + "}"); });
 
   // Gas sensor value API
-  #if HAS_GAS
   server.on("/api/gas", HTTP_GET, [](AsyncWebServerRequest *request)
             {
     if (!authenticateWeb(request)) { request->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
-    int gasRaw = analogRead(GasAnalogPin);
-    public_GasValue = (public_GasValue * 7 + gasRaw) / 8;
-    Serial.printf("[GAS/API] pin=%d raw=%d filtered=%d\n", GasAnalogPin, gasRaw, public_GasValue);
     DynamicJsonDocument doc(256);
     doc["success"] = true;
     doc["value"] = public_GasValue;
@@ -1053,7 +1024,6 @@ void HtmlFunctions()
     doc["max"] = public_GasMax;
     String out; serializeJson(doc, out);
     request->send(200, "application/json", out); });
-#endif
 
   server.on("/api/sendTestSms", HTTP_POST, [](AsyncWebServerRequest *request)
             {
@@ -1082,7 +1052,7 @@ void HtmlFunctions()
     String out; serializeJson(doc, out);
     req->send(200, "application/json", out); });
 
-  // NEW: INBOX LOG (                                     )
+  // NEW: INBOX LOG (۲۰۰ پیام دریافتی آخر)
   server.on("/api/inboxLog", HTTP_GET, [](AsyncWebServerRequest *req)
             {
     if (!authenticateWeb(req)) { req->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
@@ -1103,7 +1073,7 @@ void HtmlFunctions()
     String out; serializeJson(doc, out);
     req->send(200, "application/json", out); });
 
-  // NEW: SMS LOG (                      )
+  // NEW: SMS LOG (۲۰۰ پیام آخر)
   server.on("/api/smsLog", HTTP_GET, [](AsyncWebServerRequest *req)
             {
     if (!authenticateWeb(req)) { req->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
@@ -1111,7 +1081,7 @@ void HtmlFunctions()
     doc["success"] = true;
     JsonArray items = doc.createNestedArray("items");
 
-    //                                             
+    // از جدیدترین به قدیمی‌تر
     uint16_t cnt = g_smsLogCount;
     for (uint16_t i = 0; i < cnt; i++)
     {
@@ -1131,7 +1101,7 @@ void HtmlFunctions()
 
   server.addHandler(new AsyncCallbackJsonWebHandler("/api/login", [](AsyncWebServerRequest *request, JsonVariant &json)
                                                     {
-    if (!json.is<JsonObject>()) { request->send(400,"application/json","{\"error\":\"         JSON                      \"}"); return; }
+    if (!json.is<JsonObject>()) { request->send(400,"application/json","{\"error\":\"فرمت JSON نامعتبر است\"}"); return; }
     JsonObject obj = json.as<JsonObject>();
     String user = obj["user"];
     String pass = obj["pass"];
@@ -1143,19 +1113,19 @@ void HtmlFunctions()
       String out; serializeJson(resp, out);
       request->send(200, "application/json", out);
     } else {
-      request->send(401, "application/json", "{\"error\":\"                                            \"}");
+      request->send(401, "application/json", "{\"error\":\"نام کاربری یا رمز اشتباه\"}");
     } }));
 
   server.addHandler(new AsyncCallbackJsonWebHandler("/api/save", [](AsyncWebServerRequest *request, JsonVariant &json)
                                                     {
     if (!authenticateWeb(request)) { request->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
-    if (!json.is<JsonObject>()) { request->send(400, "application/json", "{\"error\":\"         JSON                      \"}"); return; }
+    if (!json.is<JsonObject>()) { request->send(400, "application/json", "{\"error\":\"فرمت JSON نامعتبر است\"}"); return; }
     JsonObject obj = json.as<JsonObject>();
     String key = obj["key"];
     String value = obj["value"];
     String ValidationResult = validateKey(key, value);
     if (ValidationResult != "1") {
-      request->send(400, "application/json", "{\"error\":\"                         : " + ValidationResult + "\"}");
+      request->send(400, "application/json", "{\"error\":\"مقدار نامعتبر: " + ValidationResult + "\"}");
       return;
     }
     prefs.putString(key.c_str(), value);
@@ -1165,12 +1135,12 @@ void HtmlFunctions()
   server.addHandler(new AsyncCallbackJsonWebHandler("/api/changepass", [](AsyncWebServerRequest *request, JsonVariant &json)
                                                     {
     if (!authenticateWeb(request)) { request->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
-    if (!json.is<JsonObject>()) { request->send(400,"application/json","{\"error\":\"         JSON                      \"}"); return; }
+    if (!json.is<JsonObject>()) { request->send(400,"application/json","{\"error\":\"فرمت JSON نامعتبر است\"}"); return; }
     JsonObject obj = json.as<JsonObject>();
     String oldpass = obj["old"];
     String newpass = obj["new"];
-    if (oldpass != userPassword) { request->send(403,"application/json","{\"error\":\"                                   \"}"); return; }
-    if (newpass.length() < 4)    { request->send(400,"application/json","{\"error\":\"                                                      \"}"); return; }
+    if (oldpass != userPassword) { request->send(403,"application/json","{\"error\":\"رمز فعلی اشتباه است\"}"); return; }
+    if (newpass.length() < 4)    { request->send(400,"application/json","{\"error\":\"رمز جدید باید حداقل ۴ حرف باشد\"}"); return; }
     userPassword = newpass;
     prefs.putString("userPassword", newpass);
     request->send(200, "application/json", "{\"success\":true}"); }));
@@ -1189,7 +1159,7 @@ void HtmlFunctions()
     ESP.restart(); });
 
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *req)
-            { req->send(200, "text/html; charset=utf-8", index_html); });
+            { req->send(200, "text/html", index_html); });
 
   server.begin();
 }
@@ -1243,10 +1213,10 @@ void TaskDelay(int delay)
   TaskDelay((int)delay, true, false);
 }
 
-//      SetAllarmState           NO-OP                                                                                                     .
+// ما SetAllarmState را به NO-OP تبدیل می‌کنیم تا با استیت‌ماشین‌ها تداخل نداشته باشد.
 void SetAllarmState()
 {
-  //                                                         
+  // فقط ماشین حالت‌ها را جلو ببریم
   BlinkTick(ledBlink);
   BlinkTick(buzzBlink);
 }
@@ -1330,14 +1300,14 @@ bool getSignalCSQ(int &csq, int &rssiDbm)
   return true;
 }
 
-//                                               
+// پیش‌اعلام‌های مورد نیاز
 String boolStr(bool b);
 int csqToPercent(int csq);
 
-//                                                                          check
+// ساخت گزارش وضعیت فشرده مانند پاسخ دستور check
 String buildCheckReport()
 {
-  //                               CSQ                       (              )
+  // بروزرسانی آخرین CSQ اگر بتوانیم (اختیاری)
   int csq = -1, rssi = -1;
   if (getSignalCSQ(csq, rssi))
     g_lastCSQ = csq;
@@ -1355,9 +1325,9 @@ String buildCheckReport()
     int pct = csqToPercent(g_lastCSQ);
     if (pct >= 0) rep += " CSQ:" + String(pct) + "%";
   }
-  //                           
+  // مقدار گاز فعلی
   rep += " GAS:" + String(public_GasValue);
-  //                                            
+  // افزودن زمان فعلی دستگاه
   rep += " TIME:" + nowTimeReadable();
   return rep;
 }
@@ -1387,7 +1357,7 @@ void SplitMobiles()
     public_List_AllAlternetMobiles.push_back(lastMobile);
 }
 
-//                                                  (              number+code)
+// ضدتکرار سادهٔ ۳۰ ثانیه‌ای (بر اساس number+code)
 struct LastSend
 {
   String key; // number|code
@@ -1413,14 +1383,14 @@ bool shouldSendThrottled(const String &number, const String &code, uint32_t wind
   return true;
 }
 
-// ======            +                 ======
+// ====== آرشیو + صف‌بندی ======
 bool enqueueSms(String number, String text, int priority)
 {
   auto deviceNowMs64 = []() -> uint64_t {
     uint64_t nowMs = g_lastSyncUnixMs + (uint64_t)(millis() - g_lastSyncMillis);
     return nowMs;
   };
-  //                          SMS                                                                "blocked"                          
+  // اگر ارسال کلی SMS غیرفعال است، فقط در آرشیو با وضعیت "blocked" ثبت کن و برگرد
   if (!public_SmsTxEnabled)
   {
     uint32_t idb = smsLogAppend(number, detectReasonFromText(text), deviceNowMs64(), text, "blocked", priority);
@@ -1479,11 +1449,11 @@ void monitorInputSmsStateMachine()
     break;
 
   case SMS_RX_WAITING:
-    Serial.println("SMS_RX_READING     WAITING");
+    Serial.println("SMS_RX_READING → WAITING");
     if (smsRxBuffer.indexOf("+CDS:") != -1)
     {
-      Serial.println("     Delivery report received.");
-      //                   PDU                       sent/sending      delivered                
+      Serial.println("📬 Delivery report received.");
+      // بدون پارس PDU، آخرین پیام sent/sending را delivered می‌کنیم
       smsLogMarkLatestDelivered();
     }
     else if (smsRxBuffer.indexOf("+CMT:") != -1)
@@ -1506,7 +1476,7 @@ void monitorInputSmsStateMachine()
         if (text[i] < 32 || text[i] > 126)
           text[i] = ' ';
 
-      //                           (inbox)
+      // آرشیو دریافتی (inbox)
       uint64_t nowMs = g_lastSyncUnixMs + (uint64_t)(millis() - g_lastSyncMillis);
       inboxAppend(sender, text, nowMs);
 
@@ -1515,14 +1485,14 @@ void monitorInputSmsStateMachine()
       {
         incomingSmsQueue[incomingSmsTail] = {sender, text};
         incomingSmsTail = nextTail;
-        Serial.println("     SMS queued from " + sender + ": " + text);
+        Serial.println("📥 SMS queued from " + sender + ": " + text);
       }
       else
       {
-        Serial.println("       Incoming SMS queue full. Message dropped.");
+        Serial.println("⚠️ Incoming SMS queue full. Message dropped.");
       }
     }
-    Serial.println("     Raw SMS Buffer: " + smsRxBuffer);
+    Serial.println("📩 Raw SMS Buffer: " + smsRxBuffer);
     smsRxState = SMS_RX_IDLE;
     break;
   }
@@ -1544,13 +1514,13 @@ void processIncomingSmsQueue()
   }
 }
 
-//                     CSQ (0..31, 99=unknown)                                        
+// تبدیل شاخص CSQ (0..31, 99=unknown) به درصد تقریبی سیگنال
 int csqToPercent(int csq)
 {
-  if (csq < 0 || csq > 31) return -1; // 99                    
-  //                   0..31 -> 0..100                     
+  if (csq < 0 || csq > 31) return -1; // 99 یا نامعتبر
+  // نگاشت خطی 0..31 -> 0..100 با گرد کردن
   // 31 ~ 100%
-  int pct = (csq * 100 + 15) / 31; //                        
+  int pct = (csq * 100 + 15) / 31; // گردکردن ساده
   if (pct < 0) pct = 0; if (pct > 100) pct = 100;
   return pct;
 }
@@ -1610,7 +1580,7 @@ bool getGpsLocation()
   String fullResp;
   if (!sendAtWait("AT+CGNSINF", "OK", 2000, &fullResp))
   {
-    Serial.println("       AT+CGNSINF failed");
+    Serial.println("⚠️ AT+CGNSINF failed");
     return false;
   }
   Serial.println("fullResp>>>> " + fullResp);
@@ -1655,11 +1625,11 @@ bool getGpsLocation()
     return true;
   }
 
-  Serial.println("       GPS not fixed yet!");
+  Serial.println("⚠️ GPS not fixed yet!");
   return false;
 }
 
-//                                                                      E164          + (                   : 98xxxxxxxxxx)
+// نرمال‌سازی شماره موبایل به فرمت ثابت E164 بدون + (برای ایران: 98xxxxxxxxxx)
 String normalizeMobile(const String &in)
 {
   String d;
@@ -1669,17 +1639,17 @@ String normalizeMobile(const String &in)
     char c = in[i];
     if (c >= '0' && c <= '9') d += c;
   }
-  //        00                                   
+  // حذف 00 پیشوند بین‌المللی
   if (d.startsWith("00")) d.remove(0, 2);
-  //             98                                             
+  // اگر با 98 شروع شد، همان را برگردان
   if (d.startsWith("98")) return d;
-  //                            11               0                 98                
+  // اگر فرمت داخلی 11 رقمی با 0 بود → به 98 تبدیل کن
   if (d.length() == 11 && d.startsWith("0")) return String("98") + d.substring(1);
-  //        10                 (         0)          98                
+  // اگر 10 رقمی بود (بدون 0) → به 98 تبدیل کن
   if (d.length() == 10) return String("98") + d;
-  //                                            >= 12                       10                         98                     
+  // در غیر اینصورت، اگر طول >= 12 است، انتهای 10 رقم را بگیر و 98 را اضافه کن
   if (d.length() >= 12) return String("98") + d.substring(d.length() - 10);
-  return d; //                               (fallback)
+  return d; // همان چیزی که هست (fallback)
 }
 
 bool isAuthorizedNumber(String num)
@@ -1694,7 +1664,7 @@ bool isAuthorizedNumber(String num)
   return false;
 }
 
-//                                  SMS: trim + lowercase +                                           
+// نرمال‌سازی دستور SMS: trim + lowercase + حذف کاراکترهای غیرحرفی
 String normalizeCommand(const String &in)
 {
   String t = in;
@@ -1706,7 +1676,7 @@ String normalizeCommand(const String &in)
   {
     char c = t[i];
     if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) out += c;
-    //                                                                     (       '>','\r','\n',               ...)
+    // سایر کاراکترها نادیده گرفته می‌شوند (مثل '>','\r','\n', فاصله و ...)
   }
   return out;
 }
@@ -1753,25 +1723,25 @@ bool SenAtCommanSim808(String command, String expectedResponse, int timeout)
         fullResponse += line;
         if (fullResponse.indexOf(expectedResponse) != -1)
         {
-          Serial.println("    Command executed successfully.");
+          Serial.println("✅ Command executed successfully.");
           TaskDelay(100);
           return true;
         }
       }
     }
   }
-  Serial.println("    Failed to execute command: " + command);
+  Serial.println("❌ Failed to execute command: " + command);
   return false;
 }
 
-// =======                           (<=5               ) =======
-// System: "arm", "darm" (              : "disarm"                                  )
+// ======= دستورات کوتاه (<=5 کاراکتر) =======
+// System: "arm", "darm" (سازگاری: "disarm" هم پذیرفته می‌شود)
 // PIR: "piron"/"pirof"
 // VIB: "vibon"/"vibof"
 // LED: "ledon"/"ledof"
 // BUZ: "buzon"/"buzof"
 // ALR (alerts): "alron"/"alrof"
-// SMS TX (      ): "smson"/"smsof"
+// SMS TX (کلی): "smson"/"smsof"
 // WIFI: "wifon"/"wifof"
 // GPS: "gps"
 // CHECK: "check"
@@ -1804,9 +1774,9 @@ void applyBuzzerPolicy()
 
 void compileSms(String smsText, String num)
 {
-  //                                                                                                            
+  // ابتدا دستور را نرمال کنیم تا در پیام عدم دسترسی استفاده شود
   String cmd = normalizeCommand(smsText);
-  //                                                       YYYYMMDD:HHmm (        : 14040816:1221)
+  // تنظیم زمان از طریق قالب جلالی YYYYMMDD:HHmm (مثال: 14040816:1221)
   auto trySetTimeFromJalali = [&](const String &raw) -> bool {
     if (raw.length() != 13) return false;
     if (raw.charAt(8) != ':') return false;
@@ -1863,11 +1833,11 @@ void compileSms(String smsText, String num)
     g_deviceNowMs    = g_lastSyncUnixMs;
     printTimestampReadable(ms);
 
-    //                    
+    // پاسخ تایید
     enqueueSms(num, String("time set @ ") + formatTimestampReadable(ms), 1);
     return true;
   };
-  //                                                                                   
+  // تلاش برای تنظیم زمان قبل از نرمال‌سازی دستور
   if (trySetTimeFromJalali(smsText)) return;
   if (!isAuthorizedNumber(num))
   {
@@ -1875,14 +1845,14 @@ void compileSms(String smsText, String num)
     {
       String msg = String("access denied for ") + cmd + " command";
       enqueueSms(num, msg, 0);
-      Serial.println("    access denied " + num + " cmd=" + cmd);
+      Serial.println("⛔ access denied " + num + " cmd=" + cmd);
       return;
     }
   }
 
-  smsText = cmd; //                                                                                     
+  smsText = cmd; // از همین به بعد با دستور نرمال‌شده کار می‌کنیم
 
-  //                                         (                              "disarm"                   gas)
+  // محدودیت طول فرمان‌ها (به جز سازگاری با "disarm" و دستورات gas)
   if (smsText != "disarm" &&
       !(smsText.startsWith("gmin") || smsText.startsWith("gmax") || smsText.startsWith("gset") || smsText.startsWith("gason") || smsText.startsWith("gasof")) &&
       smsText.length() > 5)
@@ -1940,7 +1910,7 @@ void compileSms(String smsText, String num)
     return;
   }
 
-  //               
+  // سنسورها
   if (smsText == "piron")
   {
     public_PirEnabled = true;
@@ -1970,7 +1940,7 @@ void compileSms(String smsText, String num)
     return;
   }
 
-  //                  
+  // خروجی‌ها
   if (smsText == "ledon")
   {
     public_LedEnabled = true;
@@ -2004,7 +1974,7 @@ void compileSms(String smsText, String num)
     return;
   }
 
-  //                                  (              )
+  // آلارم‌های پیامکی (هشدارها)
   if (smsText == "alron")
   {
     public_AlertEnabled_Sms = true;
@@ -2020,7 +1990,7 @@ void compileSms(String smsText, String num)
     return;
   }
 
-  //                   SMS
+  // ارسال کلی SMS
   if (smsText == "smson")
   {
     public_SmsTxEnabled = true;
@@ -2031,7 +2001,7 @@ void compileSms(String smsText, String num)
   if (smsText == "smsof")
   {
     public_SmsTxEnabled = false;
-    prefs.putString("SmsTxEnabled", "false"); /*                                                        */
+    prefs.putString("SmsTxEnabled", "false"); /*ارسال پاسخ بعدی هم بلاک می‌شود*/
     return;
   }
 
@@ -2115,7 +2085,7 @@ void compileSms(String smsText, String num)
     return;
   }
 
-  //                 
+  // ناشناخته
   enqueueSms(num, "Unknown command: " + smsText, 2);
 }
 
@@ -2156,9 +2126,9 @@ void SetupSim()
   if (!SenAtCommanSim808("AT+CNMI=2,2,0,1,0", "OK", 1000))
     return;
 
-  Serial.println("    SIM808 Initialized Successfully!");
+  Serial.println("✅ SIM808 Initialized Successfully!");
   public_SimIsOnline = true;
-  //                                           +                                 
+  // ارسال پیام راه‌اندازی + گزارش وضعیت فشرده
   enqueueSms(public_OwnerMobileNumber, String("device setup is down! | ") + buildCheckReport(), 2);
 }
 
@@ -2169,23 +2139,23 @@ struct PirSensor
   int pin;
   String name;
   bool isAnalog;
-  unsigned long lastDebounceMs; //                           
+  unsigned long lastDebounceMs; // برای دبانس نرم
   PirSensor() : pin(-1), name(""), isAnalog(false), lastDebounceMs(0) {}
   PirSensor(int p, const char *n, bool analog = false) : pin(p), name(String(n)), isAnalog(analog), lastDebounceMs(0) {}
 };
 
-//               : 15 (        )   18 (PIR)
-PirSensor sensors[] = {PirSensor(VIB_PIN, "sensor_vibration"), PirSensor(PIR_PIN, "sensor_pir")};
+// سنسورها: 15 (لرزش)، 18 (PIR)
+PirSensor sensors[] = {PirSensor(15, "sensor_vibration"), PirSensor(18, "sensor_pir")};
 const int sensorCount = sizeof(sensors) / sizeof(sensors[0]);
 
-//                                                                                            
+// پنجرهٔ لغزان ۲ ثانیه‌ای با بافر کوچک مُهرزمان‌ها
 const uint32_t WINDOW_MS = 2000;
 const uint8_t MAX_EVENTS_PER_SENSOR = 16;
 uint32_t g_eventTimes[2][MAX_EVENTS_PER_SENSOR]; // [sensorIndex][slot]
 uint8_t g_eventCount[2] = {0, 0};
-const uint32_t DEBOUNCE_MS = 80; //                  
+const uint32_t DEBOUNCE_MS = 80; // دبانس نرم
 
-//                         LED/Buzzer (                 )
+// استیت‌ماشین LED/Buzzer (غیر بلوکه)
 struct BlinkSM
 {
   int pin;
@@ -2194,7 +2164,7 @@ struct BlinkSM
   uint32_t lastToggle;
   uint32_t onMs;
   uint32_t offMs;
-  uint32_t stopAt; //        0                                                            
+  uint32_t stopAt; // اگر 0 یعنی نامحدود تا وقتی دستوری بیاد
 };
 
 BlinkSM ledSM = {AllarmLedPin, false, LOW, 0, 500, 500, 0};
@@ -2239,7 +2209,7 @@ void smTick(BlinkSM &sm)
   }
 }
 
-//                                                     
+// اضافه کردن مُهرزمان با دبانس
 void recordEvent(uint8_t idx)
 {
   uint32_t now = millis();
@@ -2257,7 +2227,7 @@ void recordEvent(uint8_t idx)
   }
 }
 
-//                                                 
+// پاکسازی قدیمی‌ها در پنجره
 void pruneWindow(uint8_t idx)
 {
   uint32_t now = millis();
@@ -2274,9 +2244,9 @@ uint8_t windowCount(uint8_t idx)
   return g_eventCount[idx];
 }
 
-//                    :
-//         :                 >=4        s                
-//         :            >=5                                                                      4               
+// منطق آلارم:
+// شرط۱: هر سنسور >=4 در ۲s  → آلارم
+// شرط۲: مجموع >=5  به‌شرط مشارکت هر دو سنسور و هر کدام ≤4 → آلارم
 bool shouldAlarm(uint8_t vCount, uint8_t pCount)
 {
   bool c1 = (vCount >= 4) || (pCount >= 4);
@@ -2286,7 +2256,7 @@ bool shouldAlarm(uint8_t vCount, uint8_t pCount)
   return c1 || c2;
 }
 
-//                                            LED                                                               .
+// با هر تریگر «کم‌اهمیت» LED چشمک بزن؛ با آلارم، بیزر چشمک بزند.
 uint32_t ledExtendUntilMs = 0;
 const uint32_t LED_EXTEND_MS = 2000;
 const uint32_t BUZZER_ALARM_MS = 4000;
@@ -2295,21 +2265,6 @@ uint32_t alarmCooldownUntilMs = 0;
 
 void PollSensorsAndDecide()
 {
-  bool gasAlarmNow = false;
-#if HAS_GAS
-  static uint32_t _lastGasLog = 0;
-  int gasRaw = analogRead(GasAnalogPin);
-  public_GasValue = (public_GasValue * 7 + gasRaw) / 8;
-  if (public_GasEnabled) {
-    gasAlarmNow = (public_GasValue < public_GasMin) || (public_GasValue > public_GasMax);
-  }
-  if (millis() - _lastGasLog > 1000) {
-    _lastGasLog = millis();
-    Serial.printf("[GAS/TICK] pin=%d raw=%d filtered=%d range=[%d,%d] enabled=%d\n",
-                  GasAnalogPin, gasRaw, public_GasValue, public_GasMin, public_GasMax, (int)public_GasEnabled);
-  }
-#endif
-
   if (!public_SystemStatus)
     return;
 
@@ -2318,7 +2273,7 @@ void PollSensorsAndDecide()
   static uint8_t prevV = 0, prevP = 0;
   static bool prevLedActive = false, prevBuzzActive = false;
 
-  //                           /                                      
+  // احترام به فعال/غیرفعال بودن سنسورها
   int vibState = public_VibEnabled ? digitalRead(sensors[0].pin) : LOW;
   int pirState = public_PirEnabled ? digitalRead(sensors[1].pin) : LOW;
 
@@ -2330,7 +2285,14 @@ void PollSensorsAndDecide()
   uint8_t V = windowCount(0);
   uint8_t P = windowCount(1);
 
-  // gasAlarmNow computed at function start
+  // خواندن سنسور گاز (میانگین ساده)
+  int gasRaw = analogRead(GasAnalogPin);
+  public_GasValue = (public_GasValue * 7 + gasRaw) / 8;
+  bool gasAlarmNow = false;
+  if (public_GasEnabled)
+  {
+    gasAlarmNow = (public_GasValue < public_GasMin) || (public_GasValue > public_GasMax);
+  }
 
   int32_t cooldownLeft = (alarmCooldownUntilMs > now) ? (int32_t)(alarmCooldownUntilMs - now) : 0;
 
@@ -2372,9 +2334,9 @@ void PollSensorsAndDecide()
     prevLedActive = ledSM.active;
   }
 
-  // ---                       ---
+  // --- تصمیم‌گیری ---
 
-  //                                                                                                                                                               
+  // آلارم → بیزر، فقط اگر بیزر فعال باشد و کول‌داون تمام شده و خود بیزر اجازه داده شده باشد
   if (alarmNow && !buzzSM.active && (int32_t)(now - alarmCooldownUntilMs) >= 0)
   {
     if (public_AlertEnabled_Buzzer)
@@ -2396,7 +2358,7 @@ void PollSensorsAndDecide()
       Serial.println("[ALRM] Buzzer disabled -> no buzzer start.");
     }
 
-    //            SMS                                           
+    // ارسال SMS آلارم فقط اگر مجاز باشد
     if (public_AlertEnabled_Sms)
     {
       for (auto &num : public_List_AllAlternetMobiles)
@@ -2404,11 +2366,9 @@ void PollSensorsAndDecide()
         if (shouldSendThrottled(num, gasAlarmNow?"GAS":"ALARM", 30000))
         {
           String cause;
-          #if HAS_GAS
           if (gasAlarmNow)
             cause = String("GAS ") + String(public_GasValue) + " in[" + String(public_GasMin) + "," + String(public_GasMax) + "]";
           else
-          #endif
             cause = (V >= 4 && P < 4)   ? "PIR"
                    : (P >= 4 && V < 4) ? "VIB"
                                        : "BOTH";
@@ -2429,7 +2389,7 @@ void PollSensorsAndDecide()
   }
   else if (!alarmNow)
   {
-    //                                    LED                                                        LED                    
+    // فعالیت کم‌اهمیت → LED چشمک‌زن، اگر بیزر فعال نیست و LED اجازه دارد
     if ((vibState == HIGH || pirState == HIGH || V > 0 || P > 0) && !buzzSM.active && public_LedEnabled)
     {
       if (!ledSM.active)
@@ -2446,23 +2406,23 @@ void PollSensorsAndDecide()
   {
     if (buzzSM.active)
     {
-      Serial.println("[ALRM] condition true but buzzer already ACTIVE     no restart.");
+      Serial.println("[ALRM] condition true but buzzer already ACTIVE → no restart.");
     }
     else if ((int32_t)(now - alarmCooldownUntilMs) < 0)
     {
-      Serial.printf("[ALRM] condition true but still in cooldown (%ld ms left)     no start.\n",
+      Serial.printf("[ALRM] condition true but still in cooldown (%ld ms left) → no start.\n",
                     (long)((int32_t)(alarmCooldownUntilMs - now)));
     }
   }
 
-  //        LED                                        
+  // اگر LED غیرفعال شد، خاموشش کن
   if (!public_LedEnabled && ledSM.active)
   {
     Serial.println("[LED ] policy disabled -> STOP.");
     smStop(ledSM);
   }
 
-  //                     LED                        s (                                 )
+  // خاموش کردن LED بعد از سکوت ۲s (اگر بیزر فعال نیست)
   if (ledSM.active && (int32_t)(now - ledExtendUntilMs) > 0 && buzzSM.active == false)
   {
     Serial.println("[LED ] STOP due to silence (no events in the last 2s).");
@@ -2470,7 +2430,7 @@ void PollSensorsAndDecide()
   }
 }
 
-// ======                SMS                                                    ======
+// ====== فرستنده SMS با به‌روزرسانی وضعیت آرشیو ======
 void SmsSender()
 {
   if (smsState == SMS_IDLE)
@@ -2563,7 +2523,7 @@ void SmsSender()
 
     if (smsSendRespBuf.indexOf("ERROR") != -1 || smsSendRespBuf.indexOf("+CMS ERROR") != -1)
     {
-      Serial.printf("    SMS failed to %s: %s\n", currentMessage.number.c_str(), currentMessage.text.c_str());
+      Serial.printf("❌ SMS failed to %s: %s\n", currentMessage.number.c_str(), currentMessage.text.c_str());
       smsLogUpdateStatus(currentMessage.archiveId, "failed");
       currentPriority = -1;
       smsState = SMS_IDLE;
@@ -2572,7 +2532,7 @@ void SmsSender()
 
     if (smsSendRespBuf.indexOf("+CMGS:") != -1 && smsSendRespBuf.indexOf("OK") != -1)
     {
-      Serial.printf("     SMS accepted by modem (CMGS) to %s: %s\n", currentMessage.number.c_str(), currentMessage.text.c_str());
+      Serial.printf("📩 SMS accepted by modem (CMGS) to %s: %s\n", currentMessage.number.c_str(), currentMessage.text.c_str());
       smsLogOnSent(currentMessage.archiveId);
       currentPriority = -1;
       smsState = SMS_IDLE;
@@ -2582,7 +2542,7 @@ void SmsSender()
     if (millis() - smsTimer > 15000)
     {
       // Fallback: consider as sent after timeout
-      Serial.printf("     SMS sent (timeout fallback) to %s: %s\n", currentMessage.number.c_str(), currentMessage.text.c_str());
+      Serial.printf("📩 SMS sent (timeout fallback) to %s: %s\n", currentMessage.number.c_str(), currentMessage.text.c_str());
       smsLogOnSent(currentMessage.archiveId);
       currentPriority = -1;
       smsState = SMS_IDLE;
@@ -2595,14 +2555,14 @@ void SmsSender()
 
 void SetPublicVariablesFromPrefs()
 {
-  //                                                  
+  // مقداردهی کلیدها اگر نبودند
   for (int i = 0; i < numKeys; i++)
   {
     if (!prefs.isKey(defaultKeys[i].key.c_str()))
       prefs.putString(defaultKeys[i].key.c_str(), defaultKeys[i].defaultVal);
   }
 
-  //             
+  // کاربری
   if (!prefs.isKey("username"))
     prefs.putString("username", "admin");
   if (!prefs.isKey("password"))
@@ -2617,14 +2577,8 @@ void SetPublicVariablesFromPrefs()
 
 
   public_SystemStatus = prefs.getString("SystemEnabled", "true") == "true";
-  public_PirEnabled = false;
-#if HAS_PIR
   public_PirEnabled = prefs.getString("PirEnabled", "true") == "true";
-#endif
-  public_VibEnabled = false;
-#if HAS_VIB
   public_VibEnabled = prefs.getString("VibEnabled", "true") == "true";
-#endif
   public_LedEnabled = prefs.getString("LedEnabled", "true") == "true";
   public_AlertEnabled_Buzzer = prefs.getString("BuzzerEnabled", "false") == "true";
   public_AlertEnabled_Sms = prefs.getString("SmsAlertEnabled", "true") == "true";
@@ -2632,18 +2586,9 @@ void SetPublicVariablesFromPrefs()
   public_WifiEnabled = prefs.getString("WifiEnabled", "true") == "true";
 
   // Gas sensor prefs
-  public_GasEnabled = false;
-#if HAS_GAS
   public_GasEnabled = prefs.getString("GasEnabled", "true") == "true";
-#endif
-  public_GasMin = 0;
-#if HAS_GAS
   public_GasMin = prefs.getString("GasMin", "300").toInt();
-#endif
-  public_GasMax = 0;
-#if HAS_GAS
   public_GasMax = prefs.getString("GasMax", "2500").toInt();
-#endif
 
   public_OwnerMobileNumber = prefs.getString("OwnerMobile", "09127917347");
   public_AlternetMobile = prefs.getString("alternetMobile", "");
@@ -2665,24 +2610,20 @@ void setup()
   prefs.begin("config", false);
   prefsClock.begin("clock", false);
 
-  //              
+  // پین‌ها
   pinMode(AllarmLedPin, OUTPUT);
   pinMode(AllarmBuzzerPin, OUTPUT);
 
   for (int i = 0; i < sensorCount; i++)
-    if (sensors[i].pin > 0) pinMode(sensors[i].pin, INPUT_PULLDOWN);
-  #if HAS_GAS
+    pinMode(sensors[i].pin, INPUT_PULLDOWN);
   pinMode(GasAnalogPin, INPUT);
-  analogReadResolution(12);
-  analogSetPinAttenuation(GasAnalogPin, ADC_11db);
-#endif
 
   SetPublicVariablesFromPrefs();
   StartSoftAP();
   HtmlFunctions();
   SetupSim();
 
-  //                         sync         
+  // بازیابی زمان sync قبلی
   epochStartTime = prefs.getULong("epochStartTime", 0);
   if (epochStartTime != 0)
   {
@@ -2709,15 +2650,12 @@ void loop()
   // Sensor logic + decision (non-blocking)
   PollSensorsAndDecide();
 
-  //                                                                                
+  // بررسی تلاش مجدد پیامک‌های بدون تایید تحویل
   SmsRetryTick();
 
-  //                                           (                     )
+  // تیک استیت‌ماشین قدیمی (بدون مزاحمت)
   SetAllarmState();
 }
-
-
-
 
 
 

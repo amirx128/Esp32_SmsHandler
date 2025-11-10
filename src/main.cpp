@@ -7,6 +7,9 @@
 #include <time.h>
 #include <vector>
 #include "DeviceConfig.h"
+#if HAS_DHT
+#include <DHT.h>
+#endif
 
 // ===================== Globals =====================
 
@@ -274,6 +277,13 @@ ConfigKey defaultKeys[] = {
     {"GasMax",           "                               ",         "int",    "2500",              "0",  "4095","",            false},
 
     #endif
+    #if HAS_DHT
+    {"DhtEnabled",       "DHT Enabled",                  "bool",   "true",               "",   "",    "true,false",  false},
+    {"TempMin",          "Temp Min (C)",                 "int",    "10",                "-40","125", "",            false},
+    {"TempMax",          "Temp Max (C)",                 "int",    "40",                "-40","125", "",            false},
+    {"HumMin",           "Humidity Min (%)",           "int",    "20",                "0","100", "",            false},
+    {"HumMax",           "Humidity Max (%)",           "int",    "80",                "0","100", "",            false},
+    #endif
 {"OwnerMobile",      "                   ",                "mobile", "",                   "10", "12",  "",            false},
     {"alternetMobile",   "                         ",            "mobile", "",                   "10", "10",  "",            false},
     {"AlternetMobiles",  "                                   (*      )",  "string", "",                   "10", "100", "",            false},
@@ -347,12 +357,25 @@ const char index_html[] PROGMEM = R"rawliteral(
   </div>
   <div id="grid" class="grid"></div>
 
-  )rawliteral"
+)rawliteral"
 #if HAS_GAS
 R"rawliteral(
   <div class="card">
-    <h2>          (MQ)</h2>
+    <h2>Gas Status (MQ)</h2>
     <div><strong>Current:</strong> <span id="gasVal">-</span> <small>(Range: <span id="gasRange">-</span>)</small></div>
+  </div>
+)rawliteral"
+#endif
+#if HAS_DHT
+R"rawliteral(
+  <div class="card">
+    <h2>Temperature & Humidity (DHT)</h2>
+    <div>
+      <strong>Current:</strong>
+      <span id="dhtTemp">-</span> °C,
+      <small>Humidity: <span id="dhtHum">-</span> %</small>
+      <small style="margin-left:8px;">(Temp range: <span id="dhtRange">-</span>)</small>
+    </div>
   </div>
 )rawliteral"
 #endif
@@ -478,7 +501,23 @@ R"rawliteral(
     setInterval(loadGas, 2000);
 )rawliteral"
 #endif
+#if HAS_DHT
 R"rawliteral(
+    await loadDht();
+    setInterval(loadDht, 2000);
+    /*
+)rawliteral"
+#endif
+#if HAS_DHT
+R"rawliteral(
+  <div class="card">
+    <h2>Temperature (DHT)</h2>
+    <div><strong>Current:</strong> <span id="dhtTemp">-</span> °C <small>(Range: <span id="dhtRange">-</span>)</small></div>
+  </div>
+)rawliteral"
+#endif
+R"rawliteral(
+    */
   }else{
     $('err').textContent = res.error || 'Invalid username or password';
   }
@@ -684,6 +723,7 @@ function toggleHelp(){
   if (!card.classList.contains('hidden')) renderHelp();
 }
 
+/*
 async function loadGas(){
   try{
     const d = await api('/gas');
@@ -691,6 +731,34 @@ async function loadGas(){
     const r = document.getElementById('gasRange');
     if (!v || !r) return;
     if (!d || !d.success){ v.textContent = '   '; r.textContent = '   '; return; }
+async function loadDht(){
+  try{
+    const d = await api('/dht');
+    const t = document.getElementById('dhtTemp');
+    const r = document.getElementById('dhtRange');
+    if (!t || !r) return;
+    if (!d || !d.success){ t.textContent = '—'; r.textContent = '—'; return; }
+    const tempStr = (typeof d.t === 'number') ? d.t.toFixed(1) : d.t;
+    t.textContent = tempStr;
+    r.textContent = d.min + '..' + d.max;
+    const updLabel = (key) => {
+      const inp = document.getElementById('i-'+key);
+      if (!inp) return;
+      const container = inp.parentElement;
+      if (!container) return;
+      let small = container.querySelector('small.temp-live');
+      if (!small) {
+        small = document.createElement('small');
+        small.className = 'temp-live';
+        small.style.marginRight = '8px';
+        container.appendChild(small);
+      }
+      small.textContent = 'Now: ' + tempStr + ' °C';
+    };
+    updLabel('TempMin');
+    updLabel('TempMax');
+  }catch(e){}
+}
     v.textContent = d.value;
     r.textContent = d.min + '..' + d.max;
 
@@ -713,23 +781,92 @@ async function loadGas(){
     updLabel('GasMax');
   }catch(e){}
 }
+*/
 
  //                                                    (                                                HTML)
- function fixTitles(){
-   try{
-     var outTb = document.getElementById('sms-tbody');
-     if (outTb){
-       var h2 = outTb.closest('.card').querySelector('h2');
-       if (h2) h2.textContent = '                             (                      )';
-     }
-     var inTb = document.getElementById('inbox-tbody');
-     if (inTb){
-       var h2i = inTb.closest('.card').querySelector('h2');
-       if (h2i) h2i.textContent = '                                   (                      )';
-     }
-   }catch(e){}
- }
- fixTitles();
+  function fixTitles(){
+    try{
+      var outTb = document.getElementById('sms-tbody');
+      if (outTb){
+        var h2 = outTb.closest('.card').querySelector('h2');
+        if (h2) h2.textContent = 'SMS Log (last 200)';
+      }
+      var inTb = document.getElementById('inbox-tbody');
+      if (inTb){
+        var h2i = inTb.closest('.card').querySelector('h2');
+        if (h2i) h2i.textContent = 'Inbox (last 200)';
+      }
+    }catch(e){}
+  }
+  fixTitles();
+  
+  // Re-declared clean functions (override commented broken block above)
+  async function loadGas(){
+    try{
+      const d = await api('/gas');
+      const v = document.getElementById('gasVal');
+      const r = document.getElementById('gasRange');
+      if (!v || !r) return;
+      if (!d || !d.success){ v.textContent='-'; r.textContent='-'; return; }
+      v.textContent = d.value;
+      r.textContent = d.min + '..' + d.max;
+      const updLabel = (key) => {
+        const inp = document.getElementById('i-'+key);
+        if (!inp) return;
+        const container = inp.parentElement;
+        if (!container) return;
+        let small = container.querySelector('small.gas-live');
+        if (!small) { small = document.createElement('small'); small.className='gas-live'; small.style.marginRight='8px'; container.appendChild(small); }
+        small.textContent = 'Now: ' + d.value;
+      };
+      updLabel('GasMin'); updLabel('GasMax');
+    }catch(e){}
+  }
+
+  async function loadDht(){
+    try{
+      const d = await api('/dht');
+      const tEl = document.getElementById('dhtTemp');
+      const hEl = document.getElementById('dhtHum');
+      const trEl = document.getElementById('dhtTempRange');
+      const hrEl = document.getElementById('dhtHumRange');
+      const legacyRange = document.getElementById('dhtRange');
+      if (!tEl || !hEl) return;
+      if (!d || !d.success){
+        tEl.textContent='-'; hEl.textContent='-';
+        if (trEl) trEl.textContent='-'; if (hrEl) hrEl.textContent='-'; if (legacyRange) legacyRange.textContent='-';
+        return;
+      }
+      const tempStr = (typeof d.t === 'number') ? d.t.toFixed(1) : d.t;
+      const humStr  = (typeof d.h === 'number') ? d.h.toFixed(0) : d.h;
+      tEl.textContent = tempStr;
+      hEl.textContent = humStr;
+      if (trEl) trEl.textContent = d.min + '..' + d.max;
+      if (hrEl) hrEl.textContent = d.hmin + '..' + d.hmax;
+      if (legacyRange) legacyRange.textContent = 'T: ' + (d.min + '..' + d.max) + ', H: ' + (d.hmin + '..' + d.hmax);
+
+      const updTempLabel = (key) => {
+        const inp = document.getElementById('i-'+key);
+        if (!inp) return;
+        const container = inp.parentElement;
+        if (!container) return;
+        let small = container.querySelector('small.temp-live');
+        if (!small) { small = document.createElement('small'); small.className='temp-live'; small.style.marginRight='8px'; container.appendChild(small); }
+        small.textContent = 'Now: ' + tempStr + ' C';
+      };
+      const updHumLabel = (key) => {
+        const inp = document.getElementById('i-'+key);
+        if (!inp) return;
+        const container = inp.parentElement;
+        if (!container) return;
+        let small = container.querySelector('small.hum-live');
+        if (!small) { small = document.createElement('small'); small.className='hum-live'; small.style.marginRight='8px'; container.appendChild(small); }
+        small.textContent = 'Now: ' + humStr + ' %';
+      };
+      updTempLabel('TempMin'); updTempLabel('TempMax');
+      updHumLabel('HumMin');  updHumLabel('HumMax');
+    }catch(e){}
+  }
 </script>
 
 </body>
@@ -747,6 +884,16 @@ bool public_PirEnabled;
 bool public_VibEnabled;
 bool public_WifiEnabled;
 
+#if HAS_DHT
+bool public_DhtEnabled;
+int  public_TempMin = 10;
+int  public_TempMax = 40;
+int  public_HumMin  = 20;
+int  public_HumMax  = 80;
+float public_TempValue = 0;
+float public_HumValue = 0;
+#endif
+
 String public_OwnerMobileNumber;
 String public_AlternetMobile;
 String public_AllAlternetMobiles;
@@ -761,6 +908,9 @@ int  public_GasMin = 300;
 int  public_GasMax = 2500;
 int  public_GasValue = 0;
 const int GasAnalogPin = GAS_PIN; // configured via DeviceConfig.h (0 = disabled)
+#if HAS_DHT
+DHT dht(DHT_PIN, DHT_TYPE);
+#endif
 
 // ===================== Web Helpers =====================
 
@@ -1051,6 +1201,27 @@ void HtmlFunctions()
     doc["value"] = public_GasValue;
     doc["min"] = public_GasMin;
     doc["max"] = public_GasMax;
+    String out; serializeJson(doc, out);
+    request->send(200, "application/json", out); });
+#endif
+
+#if HAS_DHT
+  server.on("/api/dht", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+    if (!authenticateWeb(request)) { request->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
+    float t = dht.readTemperature();
+    float h = dht.readHumidity();
+    if (!isnan(t)) public_TempValue = t;
+    if (!isnan(h)) public_HumValue = h;
+    Serial.printf("[DHT/API] t=%.1fC h=%.0f%%\n", public_TempValue, public_HumValue);
+    DynamicJsonDocument doc(256);
+    doc["success"] = true;
+    doc["t"] = public_TempValue;
+    doc["h"] = public_HumValue;
+    doc["min"] = public_TempMin;
+    doc["max"] = public_TempMax;
+    doc["hmin"] = public_HumMin;
+    doc["hmax"] = public_HumMax;
     String out; serializeJson(doc, out);
     request->send(200, "application/json", out); });
 #endif
@@ -2296,6 +2467,8 @@ uint32_t alarmCooldownUntilMs = 0;
 void PollSensorsAndDecide()
 {
   bool gasAlarmNow = false;
+  bool tempAlarmNow = false;
+  bool humAlarmNow  = false;
 #if HAS_GAS
   static uint32_t _lastGasLog = 0;
   int gasRaw = analogRead(GasAnalogPin);
@@ -2307,6 +2480,28 @@ void PollSensorsAndDecide()
     _lastGasLog = millis();
     Serial.printf("[GAS/TICK] pin=%d raw=%d filtered=%d range=[%d,%d] enabled=%d\n",
                   GasAnalogPin, gasRaw, public_GasValue, public_GasMin, public_GasMax, (int)public_GasEnabled);
+  }
+#endif
+
+#if HAS_DHT
+  // Periodic DHT read + log (independent of Arm state)
+  static uint32_t _lastDhtRead = 0;
+  static uint32_t _lastDhtLog  = 0;
+  if (public_DhtEnabled && (millis() - _lastDhtRead > 2000)) {
+    float t = dht.readTemperature();
+    float h = dht.readHumidity();
+    if (!isnan(t)) public_TempValue = t;
+    if (!isnan(h)) public_HumValue  = h;
+    _lastDhtRead = millis();
+  }
+  if (millis() - _lastDhtLog > 2000) {
+    _lastDhtLog = millis();
+    Serial.printf("[DHT/TICK] pin=%d t=%.1fC h=%.0f%% range=[%d,%d] enabled=%d\n",
+                  DHT_PIN, public_TempValue, public_HumValue, public_TempMin, public_TempMax, (int)public_DhtEnabled);
+  }
+  if (public_DhtEnabled) {
+    tempAlarmNow = (public_TempValue < public_TempMin) || (public_TempValue > public_TempMax);
+    humAlarmNow  = (public_HumValue  < public_HumMin)  || (public_HumValue  > public_HumMax);
   }
 #endif
 
@@ -2346,7 +2541,7 @@ void PollSensorsAndDecide()
     prevP = P;
   }
 
-  bool alarmNow = shouldAlarm(V, P) || gasAlarmNow;
+  bool alarmNow = shouldAlarm(V, P) || gasAlarmNow || tempAlarmNow || humAlarmNow;
   if (alarmNow)
   {
     bool c1 = (V >= 4) || (P >= 4);
@@ -2354,7 +2549,7 @@ void PollSensorsAndDecide()
     bool bothLe4 = (V <= 4 && P <= 4);
     bool c2 = ((V + P) >= 5) && bothHave && bothLe4;
 
-    Serial.printf("[ALRM] condition met: c1=%d, c2=%d gas=%d\n", (int)c1, (int)c2, (int)gasAlarmNow);
+    Serial.printf("[ALRM] condition met: c1=%d, c2=%d gas=%d temp=%d hum=%d\n", (int)c1, (int)c2, (int)gasAlarmNow, (int)tempAlarmNow, (int)humAlarmNow);
   }
 
   if (prevBuzzActive != buzzSM.active)
@@ -2401,7 +2596,7 @@ void PollSensorsAndDecide()
     {
       for (auto &num : public_List_AllAlternetMobiles)
       {
-        if (shouldSendThrottled(num, gasAlarmNow?"GAS":"ALARM", 30000))
+        if (shouldSendThrottled(num, gasAlarmNow?"GAS":(tempAlarmNow?"TEMP":(humAlarmNow?"HUM":"ALARM")), 30000))
         {
           String cause;
           #if HAS_GAS
@@ -2409,11 +2604,18 @@ void PollSensorsAndDecide()
             cause = String("GAS ") + String(public_GasValue) + " in[" + String(public_GasMin) + "," + String(public_GasMax) + "]";
           else
           #endif
+          #if HAS_DHT
+          if (tempAlarmNow)
+            cause = String("TEMP ") + String(public_TempValue, 1) + "C in[" + String(public_TempMin) + "," + String(public_TempMax) + "]";
+          else if (humAlarmNow)
+            cause = String("HUM ") + String((int)public_HumValue) + "% in[" + String(public_HumMin) + "," + String(public_HumMax) + "]";
+          else
+          #endif
             cause = (V >= 4 && P < 4)   ? "PIR"
                    : (P >= 4 && V < 4) ? "VIB"
                                        : "BOTH";
           // Include device time in message
-          String msg = gasAlarmNow
+          String msg = (gasAlarmNow || tempAlarmNow || humAlarmNow)
                         ? (String("ALARM:") + cause + " @ " + nowTimeReadable())
                         : (String("ALARM:") + cause + " V=" + String(V) + " P=" + String(P) + " @ " + nowTimeReadable());
 
@@ -2645,6 +2847,14 @@ void SetPublicVariablesFromPrefs()
   public_GasMax = prefs.getString("GasMax", "2500").toInt();
 #endif
 
+#if HAS_DHT
+  public_DhtEnabled = prefs.getString("DhtEnabled", "true") == "true";
+  public_TempMin = prefs.getString("TempMin", "10").toInt();
+  public_TempMax = prefs.getString("TempMax", "40").toInt();
+  public_HumMin  = prefs.getString("HumMin",  "20").toInt();
+  public_HumMax  = prefs.getString("HumMax",  "80").toInt();
+#endif
+
   public_OwnerMobileNumber = prefs.getString("OwnerMobile", "09127917347");
   public_AlternetMobile = prefs.getString("alternetMobile", "");
   public_AllAlternetMobiles = prefs.getString("AlternetMobiles", "");
@@ -2671,10 +2881,14 @@ void setup()
 
   for (int i = 0; i < sensorCount; i++)
     if (sensors[i].pin > 0) pinMode(sensors[i].pin, INPUT_PULLDOWN);
-  #if HAS_GAS
+#if HAS_GAS
   pinMode(GasAnalogPin, INPUT);
   analogReadResolution(12);
   analogSetPinAttenuation(GasAnalogPin, ADC_11db);
+#endif
+
+#if HAS_DHT
+  dht.begin();
 #endif
 
   SetPublicVariablesFromPrefs();
@@ -2715,6 +2929,10 @@ void loop()
   //                                           (                     )
   SetAllarmState();
 }
+
+
+
+
 
 
 

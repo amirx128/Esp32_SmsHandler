@@ -6,10 +6,81 @@
 #include <ArduinoJson.h>
 #include <time.h>
 #include <vector>
+#include <deque>
+#include <algorithm>
+#include <functional>
+#include <stdarg.h>
+#include <stdio.h>
 #include "DeviceConfig.h"
+extern "C"
+{
+#include <esp_now.h>
+#include <esp_wifi.h>
+#include <esp_system.h>
+#include <esp_mac.h>
+}
 #if HAS_DHT
 #include <DHT.h>
 #endif
+// Lightweight logging helper toggled via IsMonitoring flag.
+void logToSerial(const String &text, bool goToNewLine = true)
+{
+  if (!IsMonitoring)
+    return;
+  if (goToNewLine)
+    Serial.println(text);
+  else
+    Serial.print(text);
+}
+
+inline void logToSerial(const char *text, bool goToNewLine = true)
+{
+  logToSerial(String(text), goToNewLine);
+}
+
+void logToSerialf(const char *fmt, ...)
+{
+  if (!IsMonitoring)
+    return;
+  va_list args;
+  va_start(args, fmt);
+  int required = vsnprintf(nullptr, 0, fmt, args);
+  va_end(args);
+  if (required <= 0)
+    return;
+  std::vector<char> buffer(required + 1);
+  va_start(args, fmt);
+  vsnprintf(buffer.data(), buffer.size(), fmt, args);
+  va_end(args);
+  logToSerial(String(buffer.data()), false);
+}
+
+struct DeviceIdentity
+{
+  uint8_t mac[6]{0};
+  String suffix;
+};
+
+DeviceIdentity &getDeviceIdentity()
+{
+  static DeviceIdentity ident;
+  static bool ready = false;
+  if (!ready)
+  {
+    esp_read_mac(ident.mac, ESP_MAC_WIFI_STA);
+    char suffix[5];
+    snprintf(suffix, sizeof(suffix), "%02X%02X", ident.mac[4], ident.mac[5]);
+    ident.suffix = String(suffix);
+    ready = true;
+  }
+  return ident;
+}
+
+String defaultApSsid()
+{
+  DeviceIdentity &id = getDeviceIdentity();
+  return String("ElixIot_") + id.suffix;
+}
 
 // ===================== Globals =====================
 
@@ -29,8 +100,6 @@ void printTimestampReadable(uint64_t timestampMs)
   time_t timestampSec = (timestampMs / 1000) + 12600; // UTC+3:30         
   struct tm *timeinfo = localtime(&timestampSec);
   strftime(lastOktime, sizeof(lastOktime), "%Y-%m-%d %H:%M:%S", timeinfo);
-  Serial.print(" ok time is : ");
-  Serial.println(lastOktime);
 }
 
 // ---- Session token for web auth ----
@@ -160,6 +229,1078 @@ void UpdateDeviceClockIfNeeded()
   }
 }
 
+uint64_t deviceUnixNowMs()
+{
+  if (g_lastSyncUnixMs == 0)
+    return millis();
+  return g_lastSyncUnixMs + (uint64_t)(millis() - g_lastSyncMillis);
+}
+
+// ===================== Mesh Networking =====================
+
+const uint32_t MESH_HEARTBEAT_INTERVAL_MS = 10000;
+const uint32_t MESH_OFFLINE_TIMEOUT_MS = 25000;
+const uint32_t MESH_STATE_REQUEST_DELAY_MS = 4000;
+const uint32_t MESH_MESSAGE_LOG_TTL_MS = 15UL * 60UL * 1000UL;
+const uint32_t MESH_PERSIST_INTERVAL_MS = 5000;
+const uint32_t MESH_ACK_TIMEOUT_MS = 4000;
+const uint8_t MESH_MAX_RETRIES = 5;
+const uint8_t MESH_DEFAULT_TTL = 8;
+const size_t MESH_MAX_MESSAGE_LOG = 48;
+const char *MESH_CACHE_KEY = "mesh_cache";
+
+enum MeshCapabilityBits : uint16_t
+{
+  CAP_VIB = 1 << 0,
+  CAP_PIR = 1 << 1,
+  CAP_GAS = 1 << 2,
+  CAP_DHT = 1 << 3,
+  CAP_SIM = 1 << 4,
+  CAP_SIREN = 1 << 5,
+  CAP_SMS = 1 << 6,
+  CAP_WEB = 1 << 7
+};
+
+struct MeshNodeInfo
+{
+  String id;
+  uint16_t caps = 0;
+  bool simBusy = false;
+  bool sirenActive = false;
+  uint32_t heartbeatSeq = 0;
+  uint32_t timeVersion = 0;
+  uint64_t lastSeenMs = 0;
+  bool online = false;
+  std::vector<String> neighbors;
+};
+
+struct MeshMessageRecord
+{
+  uint64_t id = 0;
+  String type;
+  String origin;
+  String target;
+  uint64_t timestamp = 0;
+  bool requiresAck = false;
+  uint8_t minAckCount = 0;
+  std::vector<String> seenNodes;
+  std::vector<String> ackedNodes;
+  String status;
+};
+
+struct MeshOutgoingPacket
+{
+  uint64_t id = 0;
+  String type;
+  String serialized;
+  bool requiresAck = false;
+  uint8_t minAckCount = 0;
+  uint8_t retries = 0;
+  uint32_t lastSendMs = 0;
+};
+
+struct MeshSeenMessage
+{
+  uint64_t id = 0;
+  uint64_t ts = 0;
+  uint32_t bloom = 0;
+};
+
+std::vector<MeshNodeInfo> g_meshNodes;
+std::deque<MeshMessageRecord> g_meshMessageLog;
+std::vector<MeshOutgoingPacket> g_meshOutbox;
+std::vector<MeshSeenMessage> g_meshSeen;
+uint64_t g_meshMessageCounter = 0;
+uint32_t g_lastMeshHeartbeatMs = 0;
+uint32_t g_lastMeshRosterBroadcast = 0;
+uint32_t g_lastMeshTimeAnnounce = 0;
+uint32_t g_lastMeshHealthCheck = 0;
+uint32_t g_lastStateRequestMs = 0;
+bool g_meshBacklogRequested = false;
+bool g_meshRadioReady = false;
+bool g_meshInitDone = false;
+bool g_meshStateDirty = false;
+uint32_t g_lastMeshPersistMs = 0;
+bool g_remoteStateReady = false;
+bool g_sirenActiveFlag = false;
+bool g_lastSimBusy = false;
+uint32_t g_localHeartbeatSeq = 0;
+uint8_t g_meshBroadcastAddr[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+uint32_t g_meshTimeVersion = 0;
+String g_lastTimeAuthority = g_selfNodeId;
+std::vector<uint64_t> g_handledSmsRequests;
+
+void meshOnDataRecv(const uint8_t *mac, const uint8_t *data, int len);
+void meshOnDataSent(const uint8_t *mac, esp_now_send_status_t status);
+
+uint16_t computeLocalCapabilityMask()
+{
+  uint16_t mask = CAP_WEB;
+#if HAS_VIB
+  if (HAS_VIB) mask |= CAP_VIB;
+#endif
+#if HAS_PIR
+  if (HAS_PIR) mask |= CAP_PIR;
+#endif
+#if HAS_GAS
+  if (HAS_GAS) mask |= CAP_GAS;
+#endif
+#if HAS_DHT
+  if (HAS_DHT) mask |= CAP_DHT;
+#endif
+  if (DEVICE_HAS_SIM)
+    mask |= CAP_SIM | CAP_SMS;
+  if (DEVICE_HAS_SIREN)
+    mask |= CAP_SIREN;
+  return mask;
+}
+
+uint16_t g_localCapabilityMask = computeLocalCapabilityMask();
+
+MeshNodeInfo *findMeshNode(const String &id)
+{
+  for (auto &node : g_meshNodes)
+    if (node.id == id)
+      return &node;
+  return nullptr;
+}
+
+MeshNodeInfo &ensureMeshNode(const String &id)
+{
+  MeshNodeInfo *node = findMeshNode(id);
+  if (node)
+    return *node;
+  MeshNodeInfo info;
+  info.id = id;
+  g_meshNodes.push_back(info);
+  g_meshStateDirty = true;
+  return g_meshNodes.back();
+}
+
+uint32_t meshHash(const String &id)
+{
+  uint32_t h = 2166136261u;
+  for (size_t i = 0; i < id.length(); ++i)
+  {
+    h ^= (uint8_t)id[i];
+    h *= 16777619u;
+  }
+  return h;
+}
+
+uint32_t meshBloomInclude(uint32_t bloom, const String &id)
+{
+  uint8_t bit = meshHash(id) & 31;
+  return bloom | (1u << bit);
+}
+
+bool meshBloomHas(uint32_t bloom, const String &id)
+{
+  if (bloom == 0)
+    return false;
+  uint8_t bit = meshHash(id) & 31;
+  return ((bloom >> bit) & 0x1) != 0;
+}
+
+void meshRegisterSeen(uint64_t id, uint32_t bloom)
+{
+  for (auto &entry : g_meshSeen)
+    if (entry.id == id)
+    {
+      entry.ts = deviceUnixNowMs();
+      entry.bloom = bloom;
+      return;
+    }
+  g_meshSeen.push_back({id, deviceUnixNowMs(), bloom});
+  if (g_meshSeen.size() > 64)
+    g_meshSeen.erase(g_meshSeen.begin());
+}
+
+bool meshAlreadySeen(uint64_t id)
+{
+  for (auto &entry : g_meshSeen)
+    if (entry.id == id)
+      return true;
+  return false;
+}
+
+void meshPruneSeen()
+{
+  uint64_t now = deviceUnixNowMs();
+  g_meshSeen.erase(std::remove_if(g_meshSeen.begin(), g_meshSeen.end(),
+                                  [now](const MeshSeenMessage &msg)
+                                  { return (now - msg.ts) > MESH_MESSAGE_LOG_TTL_MS; }),
+                   g_meshSeen.end());
+}
+
+MeshMessageRecord *findMeshMessage(uint64_t id)
+{
+  for (auto &msg : g_meshMessageLog)
+    if (msg.id == id)
+      return &msg;
+  return nullptr;
+}
+
+void meshPruneMessageLog()
+{
+  uint64_t now = deviceUnixNowMs();
+  while (!g_meshMessageLog.empty())
+  {
+    auto &front = g_meshMessageLog.front();
+    if ((now - front.timestamp) > MESH_MESSAGE_LOG_TTL_MS || g_meshMessageLog.size() > MESH_MAX_MESSAGE_LOG)
+    {
+      g_meshMessageLog.pop_front();
+      g_meshStateDirty = true;
+    }
+    else
+      break;
+  }
+}
+
+void meshAppendLog(const MeshMessageRecord &rec)
+{
+  g_meshMessageLog.push_back(rec);
+  meshPruneMessageLog();
+  g_meshStateDirty = true;
+}
+
+void meshUpdateMessageStatus(uint64_t id, const String &status)
+{
+  MeshMessageRecord *rec = findMeshMessage(id);
+  if (rec)
+  {
+    rec->status = status;
+    g_meshStateDirty = true;
+  }
+}
+
+void meshRecordSeenBy(uint64_t id, const String &nodeId)
+{
+  MeshMessageRecord *rec = findMeshMessage(id);
+  if (!rec)
+    return;
+  if (std::find(rec->seenNodes.begin(), rec->seenNodes.end(), nodeId) == rec->seenNodes.end())
+  {
+    rec->seenNodes.push_back(nodeId);
+    g_meshStateDirty = true;
+  }
+}
+
+void meshRecordAck(uint64_t id, const String &nodeId)
+{
+  MeshMessageRecord *rec = findMeshMessage(id);
+  if (!rec)
+    return;
+  if (std::find(rec->ackedNodes.begin(), rec->ackedNodes.end(), nodeId) == rec->ackedNodes.end())
+  {
+    rec->ackedNodes.push_back(nodeId);
+    g_meshStateDirty = true;
+  }
+}
+
+void meshPersistState()
+{
+  if (!g_meshStateDirty)
+    return;
+  DynamicJsonDocument doc(8192);
+  JsonArray nodes = doc.createNestedArray("nodes");
+  for (auto &node : g_meshNodes)
+  {
+    JsonObject obj = nodes.createNestedObject();
+    obj["id"] = node.id;
+    obj["caps"] = node.caps;
+    obj["simBusy"] = node.simBusy;
+    obj["siren"] = node.sirenActive;
+    obj["hb"] = node.heartbeatSeq;
+    obj["tv"] = node.timeVersion;
+    obj["ts"] = (uint64_t)node.lastSeenMs;
+    JsonArray neigh = obj.createNestedArray("nb");
+    for (auto &n : node.neighbors)
+      neigh.add(n);
+  }
+  JsonArray msgs = doc.createNestedArray("messages");
+  for (auto &msg : g_meshMessageLog)
+  {
+    JsonObject obj = msgs.createNestedObject();
+    obj["id"] = msg.id;
+    obj["type"] = msg.type;
+    obj["origin"] = msg.origin;
+    obj["target"] = msg.target;
+    obj["ts"] = (uint64_t)msg.timestamp;
+    obj["status"] = msg.status;
+    obj["ack"] = msg.requiresAck;
+    obj["minAck"] = msg.minAckCount;
+    JsonArray seen = obj.createNestedArray("seen");
+    for (auto &n : msg.seenNodes)
+      seen.add(n);
+    JsonArray ack = obj.createNestedArray("acks");
+    for (auto &n : msg.ackedNodes)
+      ack.add(n);
+  }
+  doc["timeVersion"] = g_meshTimeVersion;
+  doc["timeAuthority"] = g_lastTimeAuthority;
+  String out;
+  serializeJson(doc, out);
+  prefs.putString(MESH_CACHE_KEY, out);
+  g_meshStateDirty = false;
+  g_lastMeshPersistMs = millis();
+}
+
+void meshLoadPersistedState()
+{
+  String raw = prefs.getString(MESH_CACHE_KEY, "");
+  if (!raw.length())
+    return;
+  DynamicJsonDocument doc(8192);
+  if (deserializeJson(doc, raw) != DeserializationError::Ok)
+    return;
+  g_meshNodes.clear();
+  if (doc.containsKey("nodes"))
+  {
+    for (JsonObject obj : doc["nodes"].as<JsonArray>())
+    {
+      MeshNodeInfo info;
+      info.id = obj["id"].as<String>();
+      info.caps = obj["caps"] | 0;
+      info.simBusy = obj["simBusy"] | false;
+      info.sirenActive = obj["siren"] | false;
+      info.heartbeatSeq = obj["hb"] | 0;
+      info.timeVersion = obj["tv"] | 0;
+      info.lastSeenMs = obj["ts"] | 0;
+      info.online = false;
+      if (obj.containsKey("nb"))
+        for (JsonVariant v : obj["nb"].as<JsonArray>())
+          info.neighbors.push_back(v.as<String>());
+      g_meshNodes.push_back(info);
+    }
+  }
+  g_meshMessageLog.clear();
+  if (doc.containsKey("messages"))
+  {
+    for (JsonObject obj : doc["messages"].as<JsonArray>())
+    {
+      MeshMessageRecord rec;
+      rec.id = obj["id"] | 0;
+      rec.type = obj["type"].as<String>();
+      rec.origin = obj["origin"].as<String>();
+      rec.target = obj["target"].as<String>();
+      rec.timestamp = obj["ts"] | 0;
+      rec.status = obj["status"].as<String>();
+      rec.requiresAck = obj["ack"] | false;
+      rec.minAckCount = obj["minAck"] | 0;
+      if (obj.containsKey("seen"))
+        for (JsonVariant v : obj["seen"].as<JsonArray>())
+          rec.seenNodes.push_back(v.as<String>());
+      if (obj.containsKey("acks"))
+        for (JsonVariant v : obj["acks"].as<JsonArray>())
+          rec.ackedNodes.push_back(v.as<String>());
+      g_meshMessageLog.push_back(rec);
+    }
+  }
+  g_meshTimeVersion = doc["timeVersion"] | 0;
+  g_lastTimeAuthority = doc["timeAuthority"].as<String>();
+  g_meshStateDirty = false;
+  g_lastMeshPersistMs = millis();
+}
+
+uint64_t meshNextMessageId()
+{
+  uint64_t upper = ((uint64_t)esp_random()) << 32;
+  return upper ^ (++g_meshMessageCounter);
+}
+
+uint8_t meshCountOnlineNodesWithCap(uint16_t capMask)
+{
+  uint8_t count = 0;
+  for (auto &node : g_meshNodes)
+  {
+    bool isSelf = node.id == g_selfNodeId;
+    if ((node.caps & capMask) && (node.online || isSelf))
+      count++;
+  }
+  return count;
+}
+
+bool meshShouldHandleSmsRequest(const String &originId)
+{
+  if (!DEVICE_HAS_SIM || !public_SmsTxEnabled)
+    return false;
+  std::vector<String> sims;
+  for (auto &node : g_meshNodes)
+    if ((node.caps & CAP_SIM) != 0)
+      sims.push_back(node.id);
+  if (std::find(sims.begin(), sims.end(), g_selfNodeId) == sims.end())
+    sims.push_back(g_selfNodeId);
+  if (sims.empty())
+    return false;
+  std::sort(sims.begin(), sims.end());
+  auto it = std::lower_bound(sims.begin(), sims.end(), originId);
+  if (it == sims.end())
+    it = sims.begin();
+  return *it == g_selfNodeId;
+}
+
+String meshJoinNumbers(const std::vector<String> &numbers)
+{
+  String out;
+  for (size_t i = 0; i < numbers.size(); ++i)
+  {
+    out += numbers[i];
+    if (i + 1 < numbers.size())
+      out += ",";
+  }
+  return out;
+}
+
+void meshBroadcastAlarm(const String &cause,
+                        uint8_t vibCount,
+                        uint8_t pirCount,
+                        bool gasAlarm,
+                        bool tempAlarm,
+                        bool humAlarm)
+{
+  uint8_t sirenNodes = meshCountOnlineNodesWithCap(CAP_SIREN);
+  uint8_t minAck = (sirenNodes > 1) ? sirenNodes : 0;
+  meshPublish("al",
+              [&](JsonObject &payload)
+              {
+                payload["cause"] = cause;
+                payload["v"] = vibCount;
+                payload["p"] = pirCount;
+                payload["gas"] = gasAlarm ? 1 : 0;
+                payload["temp"] = tempAlarm ? 1 : 0;
+                payload["hum"] = humAlarm ? 1 : 0;
+                payload["reqSir"] = 1;
+              },
+              true,
+              minAck,
+              "");
+}
+
+void meshBroadcastSmsRequest(const std::vector<String> &numbers, const String &text, int priority)
+{
+  if (numbers.empty() || !text.length())
+    return;
+  String joined = meshJoinNumbers(numbers);
+  meshPublish("sr",
+              [&](JsonObject &payload)
+              {
+                payload["nums"] = joined;
+                payload["text"] = text;
+                payload["priority"] = priority;
+              },
+              true,
+              1,
+              "");
+}
+
+void meshHandleHeartbeat(JsonObject payload, const String &src)
+{
+  if (payload.isNull())
+    return;
+  MeshNodeInfo &node = ensureMeshNode(src);
+  node.caps = payload["caps"] | node.caps;
+  node.simBusy = payload["busy"] | node.simBusy;
+  node.sirenActive = payload["sAct"] | node.sirenActive;
+  node.heartbeatSeq = payload["hb"] | node.heartbeatSeq;
+  node.timeVersion = payload["tv"] | node.timeVersion;
+  node.lastSeenMs = deviceUnixNowMs();
+  node.online = true;
+  g_meshStateDirty = true;
+}
+
+void meshHandleTimeUpdate(JsonObject payload, const String &src)
+{
+  if (payload.isNull())
+    return;
+  uint64_t ts = payload["ts"] | 0;
+  uint32_t version = payload["ver"] | 0;
+  String authority = payload["auth"].as<String>();
+  if (!ts || !version)
+    return;
+  bool newer = version > g_meshTimeVersion;
+  if (!newer && version == g_meshTimeVersion)
+  {
+    String ref = authority.length() ? authority : src;
+    newer = ref > g_lastTimeAuthority;
+  }
+  if (!newer)
+    return;
+  g_meshTimeVersion = version;
+  g_lastTimeAuthority = authority.length() ? authority : src;
+  g_lastSyncUnixMs = ts;
+  g_lastSyncMillis = millis();
+  g_deviceNowMs = ts;
+  prefs.putULong("epochStartTime", (unsigned long)ts);
+  prefsClock.putULong("epochStartTime", (unsigned long)ts);
+  prefsClock.putUInt("timeVersion", g_meshTimeVersion);
+  prefsClock.putString("timeAuthority", g_lastTimeAuthority);
+  printTimestampReadable(ts);
+}
+
+void meshHandleSimBusyUpdate(JsonObject payload, const String &src)
+{
+  if (payload.isNull())
+    return;
+  MeshNodeInfo &node = ensureMeshNode(src);
+  node.simBusy = payload["busy"] | node.simBusy;
+  node.lastSeenMs = deviceUnixNowMs();
+  node.online = true;
+  g_meshStateDirty = true;
+}
+
+void meshHandleSirenState(JsonObject payload, const String &src)
+{
+  if (payload.isNull())
+    return;
+  MeshNodeInfo &node = ensureMeshNode(src);
+  node.sirenActive = payload["state"] | node.sirenActive;
+  node.lastSeenMs = deviceUnixNowMs();
+  node.online = true;
+  g_meshStateDirty = true;
+}
+
+void meshHandleAlarm(JsonObject payload, const String &src, uint64_t msgId)
+{
+  if (payload.isNull())
+    return;
+  bool requireSiren = payload["reqSir"] | 1;
+  if (requireSiren && DEVICE_HAS_SIREN && public_AlertEnabled_Buzzer)
+  {
+    if (!buzzSM.active)
+    {
+      smStart(buzzSM, 500, 500, BUZZER_ALARM_MS);
+      meshSetSirenActive(true);
+    }
+  }
+  if (requireSiren)
+    meshSendAck(msgId, src, "siren");
+}
+
+void meshHandleSmsRequest(JsonObject payload, const String &src, uint64_t msgId)
+{
+  if (payload.isNull())
+    return;
+  if (!meshShouldHandleSmsRequest(src))
+    return;
+  if (std::find(g_handledSmsRequests.begin(), g_handledSmsRequests.end(), msgId) != g_handledSmsRequests.end())
+    return;
+  String numbers = payload["nums"].as<String>();
+  String text = payload["text"].as<String>();
+  if (!numbers.length() || !text.length())
+    return;
+  int priority = payload["priority"] | 1;
+  int start = 0;
+  while (true)
+  {
+    int idx = numbers.indexOf(',', start);
+    String number = numbers.substring(start, idx == -1 ? numbers.length() : idx);
+    number.trim();
+    if (number.length())
+      enqueueSms(number, text, priority);
+    if (idx == -1)
+      break;
+    start = idx + 1;
+  }
+  g_handledSmsRequests.push_back(msgId);
+  if (g_handledSmsRequests.size() > 32)
+    g_handledSmsRequests.erase(g_handledSmsRequests.begin());
+  meshSendAck(msgId, src, "sms");
+}
+
+uint64_t meshPublish(const char *type,
+                     const std::function<void(JsonObject &payload)> &builder,
+                     bool requiresAck,
+                     uint8_t minAckCount,
+                     const String &target)
+{
+  if (!g_meshRadioReady)
+    meshEnsureRadio();
+  if (!g_meshRadioReady)
+    return 0;
+  DynamicJsonDocument doc(1024);
+  JsonObject root = doc.to<JsonObject>();
+  uint64_t id = meshNextMessageId();
+  root["t"] = type;
+  root["id"] = id;
+  root["s"] = g_selfNodeId;
+  root["net"] = g_meshNetworkFingerprint;
+  if (target.length())
+    root["tg"] = target;
+  root["ts"] = deviceUnixNowMs();
+  root["ttl"] = MESH_DEFAULT_TTL;
+  root["hp"] = 0;
+  root["ack"] = requiresAck;
+  if (requiresAck && minAckCount == 0)
+    minAckCount = 1;
+  root["ackMin"] = minAckCount;
+  uint32_t bloom = meshBloomInclude(0, g_selfNodeId);
+  root["bl"] = bloom;
+  root["via"] = g_selfNodeId;
+  if (builder)
+  {
+    JsonObject payload = root.createNestedObject("p");
+    builder(payload);
+  }
+  String serialized;
+  serializeJson(root, serialized);
+  if (serialized.length() >= 235)
+  {
+    logToSerial("[MESH] payload too big, drop.", true);
+    return 0;
+  }
+  g_meshOutbox.push_back({id, String(type), serialized, requiresAck, minAckCount, 0, 0});
+  MeshMessageRecord rec;
+  rec.id = id;
+  rec.type = type;
+  rec.origin = g_selfNodeId;
+  rec.target = target;
+  rec.timestamp = root["ts"] | deviceUnixNowMs();
+  rec.requiresAck = requiresAck;
+  rec.minAckCount = minAckCount;
+  rec.status = "queued";
+  rec.seenNodes.push_back(g_selfNodeId);
+  meshAppendLog(rec);
+  meshRegisterSeen(id, bloom);
+  return id;
+}
+
+bool meshSendRaw(const String &json)
+{
+  if (!g_meshRadioReady)
+    return false;
+  if (json.length() >= 235)
+    return false;
+  esp_err_t err = esp_now_send(g_meshBroadcastAddr, (const uint8_t *)json.c_str(), json.length());
+  if (err != ESP_OK)
+  {
+    logToSerialf("[MESH] esp_now_send err=%d\n", err);
+    return false;
+  }
+  return true;
+}
+
+void meshOnDataRecv(const uint8_t *mac, const uint8_t *data, int len)
+{
+  DynamicJsonDocument doc(1024);
+  if (deserializeJson(doc, data, len) != DeserializationError::Ok)
+    return;
+  JsonObject root = doc.as<JsonObject>();
+  String type = root["t"].as<String>();
+  uint64_t msgId = root["id"] | 0;
+  String src = root["s"].as<String>();
+  if (!msgId || !type.length() || !src.length() || src == g_selfNodeId)
+    return;
+  uint32_t net = root["net"] | 0;
+  if (g_meshNetworkFingerprint && net && net != g_meshNetworkFingerprint)
+    return;
+  String target = root["tg"].as<String>();
+  bool targeted = target.length() > 0;
+  bool forMe = !targeted || target == g_selfNodeId;
+  bool alreadySeen = meshAlreadySeen(msgId);
+  if (!findMeshMessage(msgId))
+  {
+    MeshMessageRecord rec;
+    rec.id = msgId;
+    rec.type = type;
+    rec.origin = src;
+    rec.target = target;
+    rec.timestamp = root["ts"] | deviceUnixNowMs();
+    rec.requiresAck = root["ack"] | false;
+    rec.minAckCount = root["ackMin"] | 0;
+    rec.status = "rx";
+    rec.seenNodes.push_back(src);
+    meshAppendLog(rec);
+  }
+  meshRecordSeenBy(msgId, g_selfNodeId);
+  uint32_t bloom = root["bl"] | 0;
+  if (!meshBloomHas(bloom, g_selfNodeId))
+  {
+    bloom = meshBloomInclude(bloom, g_selfNodeId);
+    root["bl"] = bloom;
+  }
+  meshRegisterSeen(msgId, bloom);
+  String via = root["via"].as<String>();
+  if (via.length() && via != src)
+  {
+    MeshNodeInfo &node = ensureMeshNode(src);
+    if (std::find(node.neighbors.begin(), node.neighbors.end(), via) == node.neighbors.end())
+    {
+      node.neighbors.push_back(via);
+      g_meshStateDirty = true;
+    }
+  }
+  if (alreadySeen && !forMe)
+    return;
+  if (forMe)
+  {
+    JsonObject payload = root.containsKey("p") ? root["p"].as<JsonObject>() : JsonObject();
+    if (type == "hb")
+      meshHandleHeartbeat(payload, src);
+    else if (type == "al")
+      meshHandleAlarm(payload, src, msgId);
+    else if (type == "sr")
+      meshHandleSmsRequest(payload, src, msgId);
+    else if (type == "tm")
+      meshHandleTimeUpdate(payload, src);
+    else if (type == "sb")
+      meshHandleSimBusyUpdate(payload, src);
+    else if (type == "sa")
+      meshHandleSirenState(payload, src);
+    else if (type == "ak")
+      meshHandleAck(payload);
+    else if (type == "rq")
+      meshHandleStateRequest(src);
+    else if (type == "st")
+      meshHandleStateSnapshot(payload);
+  }
+  bool expectAck = root["ack"] | false;
+  if (expectAck && forMe)
+    meshSendAck(msgId, src, "");
+  uint8_t ttl = root["ttl"] | 0;
+  if (ttl > 1 && (!targeted || target != g_selfNodeId))
+  {
+    root["ttl"] = ttl - 1;
+    root["hp"] = (root["hp"] | 0) + 1;
+    root["via"] = g_selfNodeId;
+    String out;
+    serializeJson(doc, out);
+    meshSendRaw(out);
+  }
+}
+
+void meshOnDataSent(const uint8_t *mac, esp_now_send_status_t status)
+{
+  if (status != ESP_NOW_SEND_SUCCESS)
+    logToSerialf("[MESH] send callback err=%d\n", status);
+}
+
+void meshInit()
+{
+  if (g_meshInitDone)
+    return;
+  meshLoadPersistedState();
+  ensureMeshNode(g_selfNodeId);
+  if (!meshEnsureRadio())
+    return;
+  g_meshInitDone = true;
+  g_remoteStateReady = false;
+  g_meshBacklogRequested = false;
+  g_lastStateRequestMs = millis();
+  meshSendHeartbeat();
+}
+
+void meshLoop()
+{
+  if (!g_meshInitDone)
+    return;
+  uint32_t now = millis();
+  if ((now - g_lastMeshHeartbeatMs) >= MESH_HEARTBEAT_INTERVAL_MS)
+  {
+    g_lastMeshHeartbeatMs = now;
+    meshSendHeartbeat();
+  }
+  if (!g_meshBacklogRequested && (now - g_lastStateRequestMs) > MESH_STATE_REQUEST_DELAY_MS)
+  {
+    meshRequestState();
+    g_meshBacklogRequested = true;
+  }
+  if ((now - g_lastMeshHealthCheck) > 5000)
+  {
+    g_lastMeshHealthCheck = now;
+    meshCheckOffline();
+  }
+  meshProcessOutbox();
+  meshPruneSeen();
+  meshPruneMessageLog();
+  if (g_meshStateDirty && (now - g_lastMeshPersistMs) >= MESH_PERSIST_INTERVAL_MS)
+    meshPersistState();
+}
+
+void meshProcessOutbox()
+{
+  if (!g_meshRadioReady)
+    return;
+  uint32_t now = millis();
+  for (size_t i = 0; i < g_meshOutbox.size();)
+  {
+    auto &pkt = g_meshOutbox[i];
+    MeshMessageRecord *rec = findMeshMessage(pkt.id);
+    uint8_t ackedCount = rec ? rec->ackedNodes.size() : 0;
+    bool delivered = !pkt.requiresAck || (pkt.minAckCount == 0) || (ackedCount >= pkt.minAckCount);
+    if (delivered)
+    {
+      meshUpdateMessageStatus(pkt.id, "delivered");
+      g_meshOutbox.erase(g_meshOutbox.begin() + i);
+      continue;
+    }
+    if (pkt.retries >= MESH_MAX_RETRIES)
+    {
+      meshUpdateMessageStatus(pkt.id, "timeout");
+      g_meshOutbox.erase(g_meshOutbox.begin() + i);
+      continue;
+    }
+    if (pkt.lastSendMs != 0 && (uint32_t)(now - pkt.lastSendMs) < MESH_ACK_TIMEOUT_MS)
+    {
+      ++i;
+      continue;
+    }
+    meshSendRaw(pkt.serialized);
+    pkt.lastSendMs = now;
+    pkt.retries++;
+    meshUpdateMessageStatus(pkt.id, "sent");
+    ++i;
+  }
+}
+
+bool meshEnsureRadio()
+{
+  esp_wifi_set_channel(meshChannel, WIFI_SECOND_CHAN_NONE);
+  if (!g_meshRadioReady)
+  {
+    esp_err_t err = esp_now_init();
+    if (err != ESP_OK)
+    {
+      logToSerialf("[MESH] esp_now_init failed %d\n", err);
+      return false;
+    }
+    g_meshRadioReady = true;
+    esp_now_register_recv_cb([](const uint8_t *mac, const uint8_t *data, int len)
+                             { meshOnDataRecv(mac, data, len); });
+    esp_now_register_send_cb([](const uint8_t *mac, esp_now_send_status_t status)
+                             { meshOnDataSent(mac, status); });
+  }
+  if (esp_now_is_peer_exist(g_meshBroadcastAddr))
+    esp_now_del_peer(g_meshBroadcastAddr);
+  esp_now_peer_info_t peer = {};
+  memcpy(peer.peer_addr, g_meshBroadcastAddr, 6);
+  peer.ifidx = WIFI_IF_STA;
+  peer.channel = meshChannel;
+  peer.encrypt = false;
+  esp_err_t addStatus = esp_now_add_peer(&peer);
+  if (addStatus != ESP_OK)
+  {
+    logToSerialf("[MESH] add peer failed %d\n", addStatus);
+    return false;
+  }
+  return true;
+}
+
+void meshSendHeartbeat()
+{
+  MeshNodeInfo &self = ensureMeshNode(g_selfNodeId);
+  self.caps = g_localCapabilityMask;
+  self.lastSeenMs = deviceUnixNowMs();
+  self.online = true;
+  self.simBusy = g_lastSimBusy;
+  self.sirenActive = g_sirenActiveFlag;
+  self.timeVersion = g_meshTimeVersion;
+  self.heartbeatSeq = ++g_localHeartbeatSeq;
+  g_meshStateDirty = true;
+  meshPublish("hb",
+              [&](JsonObject &payload)
+              {
+                payload["caps"] = g_localCapabilityMask;
+                payload["busy"] = g_lastSimBusy ? 1 : 0;
+                payload["sir"] = DEVICE_HAS_SIREN ? 1 : 0;
+                payload["sim"] = DEVICE_HAS_SIM ? 1 : 0;
+                payload["sAct"] = g_sirenActiveFlag ? 1 : 0;
+                payload["hb"] = g_localHeartbeatSeq;
+                payload["tv"] = g_meshTimeVersion;
+              },
+              false,
+              0,
+              "");
+}
+
+void meshCheckOffline()
+{
+  uint64_t now = deviceUnixNowMs();
+  for (auto &node : g_meshNodes)
+  {
+    if (node.id == g_selfNodeId)
+      continue;
+    bool wasOnline = node.online;
+    node.online = (now - node.lastSeenMs) < MESH_OFFLINE_TIMEOUT_MS;
+    if (wasOnline && !node.online)
+      g_meshStateDirty = true;
+  }
+}
+
+void meshSetSimBusy(bool busy)
+{
+  if (!DEVICE_HAS_SIM)
+    return;
+  if (g_lastSimBusy == busy)
+    return;
+  g_lastSimBusy = busy;
+  meshPublish("sb",
+              [&](JsonObject &payload)
+              { payload["busy"] = busy ? 1 : 0; },
+              false,
+              0,
+              "");
+}
+
+void meshSetSirenActive(bool active)
+{
+  if (g_sirenActiveFlag == active)
+    return;
+  g_sirenActiveFlag = active;
+  meshPublish("sa",
+              [&](JsonObject &payload)
+              { payload["state"] = active ? 1 : 0; },
+              false,
+              0,
+              "");
+}
+
+void meshSendAck(uint64_t msgId, const String &origin, const char *role)
+{
+  if (!origin.length())
+    return;
+  meshPublish("ak",
+              [&](JsonObject &payload)
+              {
+                payload["msg"] = (uint64_t)msgId;
+                payload["node"] = g_selfNodeId;
+                if (role && role[0])
+                  payload["role"] = role;
+              },
+              false,
+              0,
+              origin);
+}
+
+void meshRequestState()
+{
+  if (g_remoteStateReady)
+    return;
+  meshPublish("rq",
+              [&](JsonObject &payload)
+              {
+                payload["since"] = (uint64_t)(deviceUnixNowMs() - MESH_MESSAGE_LOG_TTL_MS);
+              },
+              false,
+              0,
+              "");
+}
+
+void meshSendStateSnapshot(const String &target)
+{
+  if (!target.length())
+    return;
+  meshPublish("st",
+              [&](JsonObject &payload)
+              {
+                JsonArray nodes = payload.createNestedArray("n");
+                size_t nodeCount = 0;
+                for (auto &node : g_meshNodes)
+                {
+                  JsonObject obj = nodes.createNestedObject();
+                  obj["id"] = node.id;
+                  obj["caps"] = node.caps;
+                  obj["on"] = node.online ? 1 : 0;
+                  obj["busy"] = node.simBusy ? 1 : 0;
+                  obj["sir"] = node.sirenActive ? 1 : 0;
+                  obj["ts"] = (uint64_t)node.lastSeenMs;
+                  obj["tv"] = node.timeVersion;
+                  if (++nodeCount >= 3)
+                    break;
+                }
+                JsonArray msgs = payload.createNestedArray("m");
+                size_t msgCount = 0;
+                for (auto it = g_meshMessageLog.rbegin(); it != g_meshMessageLog.rend(); ++it)
+                {
+                  JsonObject obj = msgs.createNestedObject();
+                  obj["id"] = it->id;
+                  obj["type"] = it->type;
+                  obj["ts"] = (uint64_t)it->timestamp;
+                  obj["status"] = it->status;
+                  if (++msgCount >= 4)
+                    break;
+                }
+              },
+              true,
+              1,
+              target);
+}
+
+void meshHandleStateSnapshot(JsonObject payload)
+{
+  if (payload.isNull())
+    return;
+  if (payload.containsKey("n"))
+  {
+    for (JsonObject obj : payload["n"].as<JsonArray>())
+    {
+      MeshNodeInfo &node = ensureMeshNode(obj["id"].as<String>());
+      node.caps = obj["caps"] | node.caps;
+      node.online = obj["on"] | 0;
+      node.simBusy = obj["busy"] | 0;
+      node.sirenActive = obj["sir"] | 0;
+      node.lastSeenMs = obj["ts"] | node.lastSeenMs;
+      node.timeVersion = obj["tv"] | node.timeVersion;
+    }
+    g_meshStateDirty = true;
+  }
+  if (payload.containsKey("m"))
+  {
+    for (JsonObject obj : payload["m"].as<JsonArray>())
+    {
+      uint64_t id = obj["id"] | 0;
+      if (findMeshMessage(id))
+        continue;
+      MeshMessageRecord rec;
+      rec.id = id;
+      rec.type = obj["type"].as<String>();
+      rec.origin = "snapshot";
+      rec.timestamp = obj["ts"] | deviceUnixNowMs();
+      rec.status = obj["status"].as<String>();
+      meshAppendLog(rec);
+    }
+  }
+  g_remoteStateReady = true;
+}
+
+void meshHandleAck(JsonObject payload)
+{
+  if (payload.isNull())
+    return;
+  uint64_t ackOf = payload["msg"] | 0;
+  String node = payload["node"].as<String>();
+  if (!ackOf || !node.length())
+    return;
+  meshRecordAck(ackOf, node);
+}
+
+void meshHandleStateRequest(const String &src)
+{
+  if (src == g_selfNodeId)
+    return;
+  meshSendStateSnapshot(src);
+}
+
+void meshBroadcastTime(uint64_t timestampMs)
+{
+  if (timestampMs == 0)
+    timestampMs = deviceUnixNowMs();
+  g_meshTimeVersion = (g_meshTimeVersion == 0) ? 1 : (g_meshTimeVersion + 1);
+  g_lastTimeAuthority = g_selfNodeId;
+  prefsClock.putUInt("timeVersion", g_meshTimeVersion);
+  prefsClock.putString("timeAuthority", g_lastTimeAuthority);
+  meshPublish("tm",
+              [&](JsonObject &payload)
+              {
+                payload["ts"] = (uint64_t)timestampMs;
+                payload["ver"] = g_meshTimeVersion;
+                payload["auth"] = g_lastTimeAuthority;
+              },
+              false,
+              0,
+              "");
+}
+
 // ===================== SIM808 / SMS =====================
 
 struct SmsMessage
@@ -228,12 +1369,23 @@ Preferences prefs;
 Preferences prefsClock;
 
 // ---            /                       ---
-String ssidNameDefault = "ElixHome";
+String ssidNameDefault = defaultApSsid();
 String ssidPasswordDefault = "12345678";
 String ssidName;
 String ssidPassword;
 String username = "admin";
 String userPassword = "1234";
+
+// Mesh defaults / current values (managed via web)
+String meshSsidDefault = "ElixIot";
+String meshPasswordDefault = "ElixMesh@2024";
+String meshChannelDefaultStr = String(DEVICE_DEFAULT_MESH_CHANNEL);
+String meshSsid = meshSsidDefault;
+String meshPassword = meshPasswordDefault;
+uint8_t meshChannel = DEVICE_DEFAULT_MESH_CHANNEL;
+String g_meshNetworkName = meshSsidDefault;
+uint32_t g_meshNetworkFingerprint = 0;
+String g_selfNodeId = defaultApSsid();
 
 // ===================== Config Keys =====================
 
@@ -253,6 +1405,9 @@ struct ConfigKey
 ConfigKey defaultKeys[] = {
     {"wifi_Ssid_Name",   "                WiFi (SSID)",     "string", ssidNameDefault,      "2",  "10",  "",            false},
     {"Ssid_Password",    "       WiFi",                  "string", ssidPasswordDefault,  "3",  "20",  "",            false},
+    {"mesh_ssid",        "Mesh SSID (ElixIot)",           "string", meshSsidDefault,      "4",  "31",  "",            true},
+    {"mesh_password",    "Mesh Password",                "string", meshPasswordDefault,  "8",  "63",  "",            true},
+    {"mesh_channel",     "Mesh Channel (1-13)",          "int",    meshChannelDefaultStr, "1",  "13",  "",            true},
 
     {"deviceName",       "                   ",                "string", "            ",             "3",  "20",  "",            false},
 
@@ -1082,7 +2237,7 @@ void SmsRetryTick()
     {
       if (e.lastSentAtMs > 0 && (nowMs - e.lastSentAtMs) >= 180000ULL)
       {
-        Serial.printf("[RETRY] ALARM id=%lu attempts=%u -> requeue\n", (unsigned long)e.id, (unsigned)e.attempts);
+        logToSerialf("[RETRY] ALARM id=%lu attempts=%u -> requeue\n", (unsigned long)e.id, (unsigned)e.attempts);
         requeueArchivedSms(e.id);
       }
     }
@@ -1126,7 +2281,7 @@ void smsLogMarkLatestDelivered()
     if (g_smsLog[idx].status == "sent" || g_smsLog[idx].status == "sending")
     {
       g_smsLog[idx].status = "delivered";
-      Serial.printf("[LOG ] delivery confirmed for id=%lu number=%s\n",
+      logToSerialf("[LOG ] delivery confirmed for id=%lu number=%s\n",
                     (unsigned long)g_smsLog[idx].id, g_smsLog[idx].number.c_str());
       return;
     }
@@ -1170,7 +2325,7 @@ void HtmlFunctions()
     if (!json.is<JsonObject>()) { request->send(400,"application/json","{\"error\":\"         JSON                      \"}"); return; }
     JsonObject obj = json.as<JsonObject>();
     unsigned long long timestamp = obj["timestamp"]; // ms
-    Serial.print("browser time "); Serial.println((unsigned long long)timestamp);
+    logToSerial("browser time ", false); logToSerial((unsigned long long)timestamp);
 
     prefs.putULong("epochStartTime", (unsigned long)timestamp);
     epochStartTime = (unsigned long)timestamp;
@@ -1180,6 +2335,7 @@ void HtmlFunctions()
     g_deviceNowMs    = g_lastSyncUnixMs;
 
     printTimestampReadable(timestamp);
+    meshBroadcastTime(timestamp);
     request->send(200, "application/json", "{\"success\":true}"); }));
 
   server.on("/api/time", HTTP_GET, [](AsyncWebServerRequest *request)
@@ -1195,7 +2351,7 @@ void HtmlFunctions()
     if (!authenticateWeb(request)) { request->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
     int gasRaw = analogRead(GasAnalogPin);
     public_GasValue = (public_GasValue * 7 + gasRaw) / 8;
-    Serial.printf("[GAS/API] pin=%d raw=%d filtered=%d\n", GasAnalogPin, gasRaw, public_GasValue);
+    logToSerialf("[GAS/API] pin=%d raw=%d filtered=%d\n", GasAnalogPin, gasRaw, public_GasValue);
     DynamicJsonDocument doc(256);
     doc["success"] = true;
     doc["value"] = public_GasValue;
@@ -1213,7 +2369,7 @@ void HtmlFunctions()
     float h = dht.readHumidity();
     if (!isnan(t)) public_TempValue = t;
     if (!isnan(h)) public_HumValue = h;
-    Serial.printf("[DHT/API] t=%.1fC h=%.0f%%\n", public_TempValue, public_HumValue);
+    logToSerialf("[DHT/API] t=%.1fC h=%.0f%%\n", public_TempValue, public_HumValue);
     DynamicJsonDocument doc(256);
     doc["success"] = true;
     doc["t"] = public_TempValue;
@@ -1229,7 +2385,7 @@ void HtmlFunctions()
   server.on("/api/sendTestSms", HTTP_POST, [](AsyncWebServerRequest *request)
             {
     if (!authenticateWeb(request)) { request->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
-    Serial.println("send test message ");
+    logToSerial("send test message ");
     enqueueSms(public_OwnerMobileNumber , "test message at " + nowTimeReadable(), 2);
     request->send(200, "application/json", "{\"success\":true}"); });
 
@@ -1300,6 +2456,55 @@ void HtmlFunctions()
     String out; serializeJson(doc, out);
     req->send(200, "application/json", out); });
 
+  server.on("/api/mesh/nodes", HTTP_GET, [](AsyncWebServerRequest *req)
+            {
+    if (!authenticateWeb(req)) { req->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
+    DynamicJsonDocument doc(12288);
+    doc["success"] = true;
+    JsonArray nodes = doc.createNestedArray("nodes");
+    for (auto &node : g_meshNodes)
+    {
+      JsonObject obj = nodes.createNestedObject();
+      obj["id"] = node.id;
+      obj["caps"] = node.caps;
+      obj["online"] = node.online;
+      obj["simBusy"] = node.simBusy;
+      obj["siren"] = node.sirenActive;
+      obj["lastSeen"] = (uint64_t)node.lastSeenMs;
+      obj["timeVersion"] = node.timeVersion;
+    }
+    doc["self"] = g_selfNodeId;
+    doc["meshSsid"] = meshSsid;
+    doc["meshChannel"] = meshChannel;
+    doc["timeVersion"] = g_meshTimeVersion;
+    String out; serializeJson(doc, out);
+    req->send(200, "application/json", out); });
+
+  server.on("/api/mesh/messages", HTTP_GET, [](AsyncWebServerRequest *req)
+            {
+    if (!authenticateWeb(req)) { req->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
+    DynamicJsonDocument doc(16384);
+    doc["success"] = true;
+    JsonArray arr = doc.createNestedArray("messages");
+    for (auto &msg : g_meshMessageLog)
+    {
+      JsonObject obj = arr.createNestedObject();
+      obj["id"] = msg.id;
+      obj["type"] = msg.type;
+      obj["origin"] = msg.origin;
+      obj["target"] = msg.target;
+      obj["timestamp"] = (uint64_t)msg.timestamp;
+      obj["status"] = msg.status;
+      JsonArray seen = obj.createNestedArray("seen");
+      for (auto &s : msg.seenNodes)
+        seen.add(s);
+      JsonArray acks = obj.createNestedArray("acks");
+      for (auto &a : msg.ackedNodes)
+        acks.add(a);
+    }
+    String out; serializeJson(doc, out);
+    req->send(200, "application/json", out); });
+
   server.addHandler(new AsyncCallbackJsonWebHandler("/api/login", [](AsyncWebServerRequest *request, JsonVariant &json)
                                                     {
     if (!json.is<JsonObject>()) { request->send(400,"application/json","{\"error\":\"         JSON                      \"}"); return; }
@@ -1331,6 +2536,7 @@ void HtmlFunctions()
     }
     prefs.putString(key.c_str(), value);
     SetPublicVariablesFromPrefs();
+    StartSoftAP();
     request->send(200, "application/json", "{\"success\":true}"); }));
 
   server.addHandler(new AsyncCallbackJsonWebHandler("/api/changepass", [](AsyncWebServerRequest *request, JsonVariant &json)
@@ -1410,7 +2616,7 @@ void TaskDelay(int ms, bool serviceTick, bool serviceSms)
 void TaskDelay(int delay)
 {
   String t = String(delay);
-  Serial.println("delay for :  " + t + "  ms");
+  logToSerial("delay for :  " + t + "  ms");
   TaskDelay((int)delay, true, false);
 }
 
@@ -1426,8 +2632,8 @@ void SplitMobiles();
 void stopAP()
 {
   WiFi.softAPdisconnect(true);
-  WiFi.mode(WIFI_OFF);
-  Serial.println("[WIFI] SoftAP stopped.");
+  WiFi.mode(WIFI_STA);
+  logToSerial("[WIFI] SoftAP stopped.");
 }
 
 void StartSoftAP()
@@ -1435,20 +2641,23 @@ void StartSoftAP()
   if (!public_WifiEnabled)
   {
     stopAP();
+    WiFi.mode(WIFI_STA);
+    meshEnsureRadio();
     return;
   }
-  WiFi.mode(WIFI_AP);
-  bool ap_started = WiFi.softAP(ssidName, ssidPassword);
+  WiFi.mode(WIFI_AP_STA);
+  bool ap_started = WiFi.softAP(ssidName.c_str(), ssidPassword.c_str(), meshChannel, 0);
   if (ap_started)
   {
-    Serial.println("AP Started Successfully!");
-    Serial.print("IP Address: http://");
-    Serial.println(WiFi.softAPIP());
+    logToSerial("AP Started Successfully!");
+    logToSerial("IP Address: http://", false);
+    logToSerial(WiFi.softAPIP().toString());
   }
   else
   {
-    Serial.println("AP Failed to Start!");
+    logToSerial("AP Failed to Start!");
   }
+  meshEnsureRadio();
 }
 
 void applyActuatorsPolicy()
@@ -1595,7 +2804,7 @@ bool enqueueSms(String number, String text, int priority)
   if (!public_SmsTxEnabled)
   {
     uint32_t idb = smsLogAppend(number, detectReasonFromText(text), deviceNowMs64(), text, "blocked", priority);
-    Serial.printf("[SMS ] blocked by policy (SmsTxEnabled=false) id=%lu\n", (unsigned long)idb);
+    logToSerialf("[SMS ] blocked by policy (SmsTxEnabled=false) id=%lu\n", (unsigned long)idb);
     return false;
   }
 
@@ -1606,9 +2815,9 @@ bool enqueueSms(String number, String text, int priority)
   int nextTail = (tail + 1) % SMS_QUEUE_SIZE;
   if (nextTail == head)
   {
-    Serial.println("SMS queue full for priority " + String(priority));
+    logToSerial("SMS queue full for priority " + String(priority));
     uint32_t id = smsLogAppend(number, detectReasonFromText(text), deviceNowMs64(), text, "failed", priority);
-    Serial.printf("[LOG ] archived (failed due full queue) id=%lu\n", (unsigned long)id);
+    logToSerialf("[LOG ] archived (failed due full queue) id=%lu\n", (unsigned long)id);
     return false;
   }
 
@@ -1617,7 +2826,7 @@ bool enqueueSms(String number, String text, int priority)
   smsQueues[priority][tail] = {number, text, priority, millis(), archId};
   smsQueueTail[priority] = nextTail;
 
-  Serial.printf("[ENQ ] number=%s pr=%d archId=%lu text=%s\n",
+  logToSerialf("[ENQ ] number=%s pr=%d archId=%lu text=%s\n",
                 number.c_str(), priority, (unsigned long)archId, text.c_str());
   return true;
 }
@@ -1650,10 +2859,10 @@ void monitorInputSmsStateMachine()
     break;
 
   case SMS_RX_WAITING:
-    Serial.println("SMS_RX_READING     WAITING");
+    logToSerial("SMS_RX_READING     WAITING");
     if (smsRxBuffer.indexOf("+CDS:") != -1)
     {
-      Serial.println("     Delivery report received.");
+      logToSerial("     Delivery report received.");
       //                   PDU                       sent/sending      delivered                
       smsLogMarkLatestDelivered();
     }
@@ -1686,14 +2895,14 @@ void monitorInputSmsStateMachine()
       {
         incomingSmsQueue[incomingSmsTail] = {sender, text};
         incomingSmsTail = nextTail;
-        Serial.println("     SMS queued from " + sender + ": " + text);
+        logToSerial("     SMS queued from " + sender + ": " + text);
       }
       else
       {
-        Serial.println("       Incoming SMS queue full. Message dropped.");
+        logToSerial("       Incoming SMS queue full. Message dropped.");
       }
     }
-    Serial.println("     Raw SMS Buffer: " + smsRxBuffer);
+    logToSerial("     Raw SMS Buffer: " + smsRxBuffer);
     smsRxState = SMS_RX_IDLE;
     break;
   }
@@ -1762,11 +2971,11 @@ bool isGpsOn()
     String line = (nl > idx ? resp.substring(idx, nl) : resp.substring(idx));
     if (line.indexOf(": 1") != -1)
     {
-      Serial.println("gps power on success... resp : " + line);
+      logToSerial("gps power on success... resp : " + line);
       return true;
     }
   }
-  Serial.println("gps power on failed... resp : " + resp);
+  logToSerial("gps power on failed... resp : " + resp);
   return false;
 }
 
@@ -1781,10 +2990,10 @@ bool getGpsLocation()
   String fullResp;
   if (!sendAtWait("AT+CGNSINF", "OK", 2000, &fullResp))
   {
-    Serial.println("       AT+CGNSINF failed");
+    logToSerial("       AT+CGNSINF failed");
     return false;
   }
-  Serial.println("fullResp>>>> " + fullResp);
+  logToSerial("fullResp>>>> " + fullResp);
 
   int p = fullResp.indexOf("+CGNSINF:");
   if (p == -1)
@@ -1816,17 +3025,17 @@ bool getGpsLocation()
   String fixStatus = getToken(1);
   String latStr = getToken(3);
   String lonStr = getToken(4);
-  Serial.println(" fixStatus     " + fixStatus + "   latStr    " + latStr + "    lonStr     " + lonStr);
+  logToSerial(" fixStatus     " + fixStatus + "   latStr    " + latStr + "    lonStr     " + lonStr);
 
   if (fixStatus == "1" && latStr.length() > 2 && lonStr.length() > 2 && latStr != "0.000000" && lonStr != "0.000000")
   {
     latitude = latStr;
     longitude = lonStr;
-    Serial.println("Google Maps: https://maps.google.com/?q=" + latitude + "," + longitude);
+    logToSerial("Google Maps: https://maps.google.com/?q=" + latitude + "," + longitude);
     return true;
   }
 
-  Serial.println("       GPS not fixed yet!");
+  logToSerial("       GPS not fixed yet!");
   return false;
 }
 
@@ -1904,8 +3113,8 @@ bool SenAtCommanSim808(String command, String expectedResponse, int timeout)
   }
   lastCommandTime = millis();
 
-  Serial.print("Sending command: ");
-  Serial.println(command);
+  logToSerial("Sending command: ", false);
+  logToSerial(command);
 
   SIM808.flush();
   SIM808.println(command);
@@ -1920,18 +3129,18 @@ bool SenAtCommanSim808(String command, String expectedResponse, int timeout)
       line.trim();
       if (line.length() > 0)
       {
-        Serial.println("Received line: " + line);
+        logToSerial("Received line: " + line);
         fullResponse += line;
         if (fullResponse.indexOf(expectedResponse) != -1)
         {
-          Serial.println("    Command executed successfully.");
+          logToSerial("    Command executed successfully.");
           TaskDelay(100);
           return true;
         }
       }
     }
   }
-  Serial.println("    Failed to execute command: " + command);
+  logToSerial("    Failed to execute command: " + command);
   return false;
 }
 
@@ -2033,6 +3242,7 @@ void compileSms(String smsText, String num)
     g_lastSyncMillis = millis();
     g_deviceNowMs    = g_lastSyncUnixMs;
     printTimestampReadable(ms);
+    meshBroadcastTime(ms);
 
     //                    
     enqueueSms(num, String("time set @ ") + formatTimestampReadable(ms), 1);
@@ -2046,7 +3256,7 @@ void compileSms(String smsText, String num)
     {
       String msg = String("access denied for ") + cmd + " command";
       enqueueSms(num, msg, 0);
-      Serial.println("    access denied " + num + " cmd=" + cmd);
+      logToSerial("    access denied " + num + " cmd=" + cmd);
       return;
     }
   }
@@ -2295,7 +3505,7 @@ void SetupSim()
   SIM808.begin(9600, SERIAL_8N1, SIM808_RX, SIM808_TX);
   TaskDelay(5000);
 
-  Serial.println("Initializing SIM808...");
+  logToSerial("Initializing SIM808...");
 
   if (!SenAtCommanSim808("AT", "OK", 1000))
     return;
@@ -2327,7 +3537,7 @@ void SetupSim()
   if (!SenAtCommanSim808("AT+CNMI=2,2,0,1,0", "OK", 1000))
     return;
 
-  Serial.println("    SIM808 Initialized Successfully!");
+  logToSerial("    SIM808 Initialized Successfully!");
   public_SimIsOnline = true;
   //                                           +                                 
   enqueueSms(public_OwnerMobileNumber, String("device setup is down! | ") + buildCheckReport(), 2);
@@ -2478,7 +3688,7 @@ void PollSensorsAndDecide()
   }
   if (millis() - _lastGasLog > 1000) {
     _lastGasLog = millis();
-    Serial.printf("[GAS/TICK] pin=%d raw=%d filtered=%d range=[%d,%d] enabled=%d\n",
+    logToSerialf("[GAS/TICK] pin=%d raw=%d filtered=%d range=[%d,%d] enabled=%d\n",
                   GasAnalogPin, gasRaw, public_GasValue, public_GasMin, public_GasMax, (int)public_GasEnabled);
   }
 #endif
@@ -2496,7 +3706,7 @@ void PollSensorsAndDecide()
   }
   if (millis() - _lastDhtLog > 2000) {
     _lastDhtLog = millis();
-    Serial.printf("[DHT/TICK] pin=%d t=%.1fC h=%.0f%% range=[%d,%d] enabled=%d\n",
+    logToSerialf("[DHT/TICK] pin=%d t=%.1fC h=%.0f%% range=[%d,%d] enabled=%d\n",
                   DHT_PIN, public_TempValue, public_HumValue, public_TempMin, public_TempMax, (int)public_DhtEnabled);
   }
   if (public_DhtEnabled) {
@@ -2529,13 +3739,13 @@ void PollSensorsAndDecide()
 
   int32_t cooldownLeft = (alarmCooldownUntilMs > now) ? (int32_t)(alarmCooldownUntilMs - now) : 0;
 
-  Serial.printf("[SENS] t=%lu ms | vibPin=%d pirPin=%d | V=%u P=%u | LED=%d BUZZ=%d | cooldownLeft=%ld ms\n",
+  logToSerialf("[SENS] t=%lu ms | vibPin=%d pirPin=%d | V=%u P=%u | LED=%d BUZZ=%d | cooldownLeft=%ld ms\n",
                 (unsigned long)now, vibState, pirState, V, P,
                 (int)ledSM.active, (int)buzzSM.active, (long)cooldownLeft);
 
   if (V != prevV || P != prevP)
   {
-    Serial.printf("[WIN ] counts changed: V: %u -> %u , P: %u -> %u (window=%ums)\n",
+    logToSerialf("[WIN ] counts changed: V: %u -> %u , P: %u -> %u (window=%ums)\n",
                   prevV, V, prevP, P, (unsigned)WINDOW_MS);
     prevV = V;
     prevP = P;
@@ -2549,19 +3759,19 @@ void PollSensorsAndDecide()
     bool bothLe4 = (V <= 4 && P <= 4);
     bool c2 = ((V + P) >= 5) && bothHave && bothLe4;
 
-    Serial.printf("[ALRM] condition met: c1=%d, c2=%d gas=%d temp=%d hum=%d\n", (int)c1, (int)c2, (int)gasAlarmNow, (int)tempAlarmNow, (int)humAlarmNow);
+    logToSerialf("[ALRM] condition met: c1=%d, c2=%d gas=%d temp=%d hum=%d\n", (int)c1, (int)c2, (int)gasAlarmNow, (int)tempAlarmNow, (int)humAlarmNow);
   }
 
   if (prevBuzzActive != buzzSM.active)
   {
-    Serial.printf("[BUZZ] state change: %s -> %s\n",
+    logToSerialf("[BUZZ] state change: %s -> %s\n",
                   prevBuzzActive ? "ACTIVE" : "INACTIVE",
                   buzzSM.active ? "ACTIVE" : "INACTIVE");
     prevBuzzActive = buzzSM.active;
   }
   if (prevLedActive != ledSM.active)
   {
-    Serial.printf("[LED ] state change: %s -> %s\n",
+    logToSerialf("[LED ] state change: %s -> %s\n",
                   prevLedActive ? "ACTIVE" : "INACTIVE",
                   ledSM.active ? "ACTIVE" : "INACTIVE");
     prevLedActive = ledSM.active;
@@ -2574,7 +3784,7 @@ void PollSensorsAndDecide()
   {
     if (public_AlertEnabled_Buzzer)
     {
-      Serial.printf("[ALRM] START buzzer (on/off=500/500ms, duration=%ums). Reset LED & window. Set cooldown.\n",
+      logToSerialf("[ALRM] START buzzer (on/off=500/500ms, duration=%ums). Reset LED & window. Set cooldown.\n",
                     (unsigned)BUZZER_ALARM_MS);
 
       smStart(buzzSM, 500, 500, BUZZER_ALARM_MS);
@@ -2584,47 +3794,66 @@ void PollSensorsAndDecide()
 
       g_eventCount[0] = 0;
       g_eventCount[1] = 0;
-      Serial.println("[ALRM] window counts reset (V=0, P=0).");
+      logToSerial("[ALRM] window counts reset (V=0, P=0).");
     }
     else
     {
-      Serial.println("[ALRM] Buzzer disabled -> no buzzer start.");
+      logToSerial("[ALRM] Buzzer disabled -> no buzzer start.");
     }
+
+    String cause;
+#if HAS_GAS
+    if (gasAlarmNow)
+      cause = String("GAS ") + String(public_GasValue) + " in[" + String(public_GasMin) + "," + String(public_GasMax) + "]";
+    else
+#endif
+#if HAS_DHT
+    if (tempAlarmNow)
+      cause = String("TEMP ") + String(public_TempValue, 1) + "C in[" + String(public_TempMin) + "," + String(public_TempMax) + "]";
+    else if (humAlarmNow)
+      cause = String("HUM ") + String((int)public_HumValue) + "% in[" + String(public_HumMin) + "," + String(public_HumMax) + "]";
+    else
+#endif
+      cause = (V >= 4 && P < 4)   ? "PIR"
+             : (P >= 4 && V < 4) ? "VIB"
+                                 : "BOTH";
+
+    String msg = (gasAlarmNow || tempAlarmNow || humAlarmNow)
+                  ? (String("ALARM:") + cause + " @ " + nowTimeReadable())
+                  : (String("ALARM:") + cause + " V=" + String(V) + " P=" + String(P) + " @ " + nowTimeReadable());
+
+    meshBroadcastAlarm(cause, V, P, gasAlarmNow, tempAlarmNow, humAlarmNow);
 
     //            SMS                                           
     if (public_AlertEnabled_Sms)
     {
+      std::vector<String> allowedNumbers;
+      allowedNumbers.reserve(public_List_AllAlternetMobiles.size());
+      String throttleCode = gasAlarmNow ? "GAS" : (tempAlarmNow ? "TEMP" : (humAlarmNow ? "HUM" : "ALARM"));
       for (auto &num : public_List_AllAlternetMobiles)
       {
-        if (shouldSendThrottled(num, gasAlarmNow?"GAS":(tempAlarmNow?"TEMP":(humAlarmNow?"HUM":"ALARM")), 30000))
+        if (shouldSendThrottled(num, throttleCode, 30000))
         {
-          String cause;
-          #if HAS_GAS
-          if (gasAlarmNow)
-            cause = String("GAS ") + String(public_GasValue) + " in[" + String(public_GasMin) + "," + String(public_GasMax) + "]";
-          else
-          #endif
-          #if HAS_DHT
-          if (tempAlarmNow)
-            cause = String("TEMP ") + String(public_TempValue, 1) + "C in[" + String(public_TempMin) + "," + String(public_TempMax) + "]";
-          else if (humAlarmNow)
-            cause = String("HUM ") + String((int)public_HumValue) + "% in[" + String(public_HumMin) + "," + String(public_HumMax) + "]";
-          else
-          #endif
-            cause = (V >= 4 && P < 4)   ? "PIR"
-                   : (P >= 4 && V < 4) ? "VIB"
-                                       : "BOTH";
-          // Include device time in message
-          String msg = (gasAlarmNow || tempAlarmNow || humAlarmNow)
-                        ? (String("ALARM:") + cause + " @ " + nowTimeReadable())
-                        : (String("ALARM:") + cause + " V=" + String(V) + " P=" + String(P) + " @ " + nowTimeReadable());
-
-          Serial.printf("[SMS ] enqueue to %s: %s\n", num.c_str(), msg.c_str());
-          enqueueSms(num, msg, 0);
+          allowedNumbers.push_back(num);
         }
         else
         {
-          Serial.printf("[SMS ] throttled (skip) for %s (ALARM)\n", num.c_str());
+          logToSerialf("[SMS ] throttled (skip) for %s (ALARM)\n", num.c_str());
+        }
+      }
+      if (!allowedNumbers.empty())
+      {
+        if (DEVICE_HAS_SIM && public_SmsTxEnabled)
+        {
+          for (auto &num : allowedNumbers)
+          {
+            logToSerialf("[SMS ] enqueue to %s: %s\n", num.c_str(), msg.c_str());
+            enqueueSms(num, msg, 0);
+          }
+        }
+        else
+        {
+          meshBroadcastSmsRequest(allowedNumbers, msg, 0);
         }
       }
     }
@@ -2636,11 +3865,11 @@ void PollSensorsAndDecide()
     {
       if (!ledSM.active)
       {
-        Serial.println("[LED ] START soft-blink (on/off=500/500, no fixed duration; auto-stop on silence).");
+        logToSerial("[LED ] START soft-blink (on/off=500/500, no fixed duration; auto-stop on silence).");
         smStart(ledSM, 500, 500, 0);
       }
       ledExtendUntilMs = now + LED_EXTEND_MS;
-      Serial.printf("[LED ] extend-until set to t=%lu (in %u ms)\n",
+      logToSerialf("[LED ] extend-until set to t=%lu (in %u ms)\n",
                     (unsigned long)ledExtendUntilMs, (unsigned)LED_EXTEND_MS);
     }
   }
@@ -2648,11 +3877,11 @@ void PollSensorsAndDecide()
   {
     if (buzzSM.active)
     {
-      Serial.println("[ALRM] condition true but buzzer already ACTIVE     no restart.");
+      logToSerial("[ALRM] condition true but buzzer already ACTIVE     no restart.");
     }
     else if ((int32_t)(now - alarmCooldownUntilMs) < 0)
     {
-      Serial.printf("[ALRM] condition true but still in cooldown (%ld ms left)     no start.\n",
+      logToSerialf("[ALRM] condition true but still in cooldown (%ld ms left)     no start.\n",
                     (long)((int32_t)(alarmCooldownUntilMs - now)));
     }
   }
@@ -2660,14 +3889,14 @@ void PollSensorsAndDecide()
   //        LED                                        
   if (!public_LedEnabled && ledSM.active)
   {
-    Serial.println("[LED ] policy disabled -> STOP.");
+    logToSerial("[LED ] policy disabled -> STOP.");
     smStop(ledSM);
   }
 
   //                     LED                        s (                                 )
   if (ledSM.active && (int32_t)(now - ledExtendUntilMs) > 0 && buzzSM.active == false)
   {
-    Serial.println("[LED ] STOP due to silence (no events in the last 2s).");
+    logToSerial("[LED ] STOP due to silence (no events in the last 2s).");
     smStop(ledSM);
   }
 }
@@ -2765,7 +3994,7 @@ void SmsSender()
 
     if (smsSendRespBuf.indexOf("ERROR") != -1 || smsSendRespBuf.indexOf("+CMS ERROR") != -1)
     {
-      Serial.printf("    SMS failed to %s: %s\n", currentMessage.number.c_str(), currentMessage.text.c_str());
+      logToSerialf("    SMS failed to %s: %s\n", currentMessage.number.c_str(), currentMessage.text.c_str());
       smsLogUpdateStatus(currentMessage.archiveId, "failed");
       currentPriority = -1;
       smsState = SMS_IDLE;
@@ -2774,7 +4003,7 @@ void SmsSender()
 
     if (smsSendRespBuf.indexOf("+CMGS:") != -1 && smsSendRespBuf.indexOf("OK") != -1)
     {
-      Serial.printf("     SMS accepted by modem (CMGS) to %s: %s\n", currentMessage.number.c_str(), currentMessage.text.c_str());
+      logToSerialf("     SMS accepted by modem (CMGS) to %s: %s\n", currentMessage.number.c_str(), currentMessage.text.c_str());
       smsLogOnSent(currentMessage.archiveId);
       currentPriority = -1;
       smsState = SMS_IDLE;
@@ -2784,7 +4013,7 @@ void SmsSender()
     if (millis() - smsTimer > 15000)
     {
       // Fallback: consider as sent after timeout
-      Serial.printf("     SMS sent (timeout fallback) to %s: %s\n", currentMessage.number.c_str(), currentMessage.text.c_str());
+      logToSerialf("     SMS sent (timeout fallback) to %s: %s\n", currentMessage.number.c_str(), currentMessage.text.c_str());
       smsLogOnSent(currentMessage.archiveId);
       currentPriority = -1;
       smsState = SMS_IDLE;
@@ -2817,6 +4046,14 @@ void SetPublicVariablesFromPrefs()
   ssidName = prefs.getString("wifi_Ssid_Name", ssidNameDefault);
   ssidPassword = prefs.getString("Ssid_Password", ssidPasswordDefault);
 
+  // Mesh creds (configurable via panel)
+  meshSsid = prefs.getString("mesh_ssid", meshSsidDefault);
+  meshPassword = prefs.getString("mesh_password", meshPasswordDefault);
+  meshChannel = prefs.getString("mesh_channel", meshChannelDefaultStr).toInt();
+  if (meshChannel < 1 || meshChannel > 13)
+    meshChannel = DEVICE_DEFAULT_MESH_CHANNEL;
+  g_meshNetworkName = meshSsid.length() ? meshSsid : meshSsidDefault;
+  g_meshNetworkFingerprint = meshHash(g_meshNetworkName + "|" + meshPassword);
 
   public_SystemStatus = prefs.getString("SystemEnabled", "true") == "true";
   public_PirEnabled = false;
@@ -2859,8 +4096,8 @@ void SetPublicVariablesFromPrefs()
   public_AlternetMobile = prefs.getString("alternetMobile", "");
   public_AllAlternetMobiles = prefs.getString("AlternetMobiles", "");
 
-  Serial.println("ssidName :  " + ssidName + "    password    :    " + ssidPassword);
-  Serial.println("public_OwnerMobileNumber :  " + public_OwnerMobileNumber);
+  logToSerial("ssidName :  " + ssidName + "    password    :    " + ssidPassword);
+  logToSerial("public_OwnerMobileNumber :  " + public_OwnerMobileNumber);
   SplitMobiles();
 
   applyActuatorsPolicy();
@@ -2870,10 +4107,12 @@ void SetPublicVariablesFromPrefs()
 void setup()
 {
   Serial.begin(9600);
-  Serial.println("Starting ESP32 AP...");
+  logToSerial("Starting ESP32 AP...");
 
   prefs.begin("config", false);
   prefsClock.begin("clock", false);
+  g_meshTimeVersion = prefsClock.getUInt("timeVersion", 0);
+  g_lastTimeAuthority = prefsClock.getString("timeAuthority", g_selfNodeId);
 
   //              
   pinMode(AllarmLedPin, OUTPUT);
@@ -2895,6 +4134,7 @@ void setup()
   StartSoftAP();
   HtmlFunctions();
   SetupSim();
+  meshInit();
 
   //                         sync         
   epochStartTime = prefs.getULong("epochStartTime", 0);
@@ -2928,7 +4168,13 @@ void loop()
 
   //                                           (                     )
   SetAllarmState();
+
+  meshSetSimBusy(smsState != SMS_IDLE);
+  meshSetSirenActive(buzzSM.active);
+  meshLoop();
 }
+
+
 
 
 

@@ -35,3 +35,28 @@
 #define HAS_DHT (DHT_PIN > 0)
 
 // Future sensors can be added here similarly.
+
+// -------------------------------------------------------------
+// Global build-time toggles (extend via PlatformIO build_flags)
+// -------------------------------------------------------------
+
+#ifndef HAS_SIM_MODULE
+#define HAS_SIM_MODULE 1   // 1 = SIM/SMS modem present on this board
+#endif
+
+#ifndef HAS_SIREN_ACTUATOR
+#define HAS_SIREN_ACTUATOR 1   // 1 = buzzer/siren hardware is assembled
+#endif
+
+#ifndef DEFAULT_MESH_CHANNEL
+#define DEFAULT_MESH_CHANNEL 6
+#endif
+
+#ifndef IS_MONITORING
+#define IS_MONITORING 1   // 1 = enable Serial logging, 0 = mute completely
+#endif
+
+constexpr bool IsMonitoring = (IS_MONITORING != 0);
+constexpr bool DEVICE_HAS_SIM = (HAS_SIM_MODULE != 0);
+constexpr bool DEVICE_HAS_SIREN = (HAS_SIREN_ACTUATOR != 0);
+constexpr uint8_t DEVICE_DEFAULT_MESH_CHANNEL = DEFAULT_MESH_CHANNEL;

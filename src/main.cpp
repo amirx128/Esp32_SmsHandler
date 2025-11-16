@@ -22,6 +22,23 @@ extern "C"
 #if HAS_DHT
 #include <DHT.h>
 #endif
+
+// Forward declarations for globals defined later in the file
+class Preferences;
+extern Preferences prefs;
+extern Preferences prefsClock;
+extern bool public_SmsTxEnabled;
+extern bool public_AlertEnabled_Buzzer;
+struct BlinkSM;
+extern BlinkSM buzzSM;
+extern const uint32_t BUZZER_ALARM_MS;
+void smStart(BlinkSM &sm, uint32_t onMs, uint32_t offMs, uint32_t durationMs);
+void meshSetSirenActive(bool active);
+void StartSoftAP();
+extern String g_selfNodeId;
+extern String g_meshNetworkName;
+extern uint8_t meshChannel;
+extern uint32_t g_meshNetworkFingerprint;
 // Lightweight logging helper toggled via IsMonitoring flag.
 void logToSerial(const String &text, bool goToNewLine = true)
 {
@@ -249,6 +266,29 @@ const uint8_t MESH_DEFAULT_TTL = 8;
 const size_t MESH_MAX_MESSAGE_LOG = 48;
 const char *MESH_CACHE_KEY = "mesh_cache";
 
+// Forward declarations for mesh helpers
+uint64_t meshPublish(const char *type,
+                     const std::function<void(JsonObject &payload)> &builder,
+                     bool requiresAck,
+                     uint8_t minAckCount,
+                     const String &target);
+bool meshEnsureRadio();
+bool meshSendRaw(const String &json);
+void meshProcessOutbox();
+void meshSendHeartbeat();
+void meshRequestState();
+void meshCheckOffline();
+void meshHandleHeartbeat(JsonObject payload, const String &src);
+void meshHandleAlarm(JsonObject payload, const String &src, uint64_t msgId);
+void meshHandleSmsRequest(JsonObject payload, const String &src, uint64_t msgId);
+void meshHandleTimeUpdate(JsonObject payload, const String &src);
+void meshHandleSimBusyUpdate(JsonObject payload, const String &src);
+void meshHandleSirenState(JsonObject payload, const String &src);
+void meshHandleAck(JsonObject payload);
+void meshHandleStateRequest(const String &src);
+void meshHandleStateSnapshot(JsonObject payload);
+void meshSendAck(uint64_t msgId, const String &origin, const char *role);
+
 enum MeshCapabilityBits : uint16_t
 {
   CAP_VIB = 1 << 0,
@@ -411,7 +451,11 @@ void meshRegisterSeen(uint64_t id, uint32_t bloom)
       entry.bloom = bloom;
       return;
     }
-  g_meshSeen.push_back({id, deviceUnixNowMs(), bloom});
+  MeshSeenMessage entry;
+  entry.id = id;
+  entry.ts = deviceUnixNowMs();
+  entry.bloom = bloom;
+  g_meshSeen.push_back(entry);
   if (g_meshSeen.size() > 64)
     g_meshSeen.erase(g_meshSeen.begin());
 }
@@ -760,54 +804,6 @@ void meshHandleSirenState(JsonObject payload, const String &src)
   g_meshStateDirty = true;
 }
 
-void meshHandleAlarm(JsonObject payload, const String &src, uint64_t msgId)
-{
-  if (payload.isNull())
-    return;
-  bool requireSiren = payload["reqSir"] | 1;
-  if (requireSiren && DEVICE_HAS_SIREN && public_AlertEnabled_Buzzer)
-  {
-    if (!buzzSM.active)
-    {
-      smStart(buzzSM, 500, 500, BUZZER_ALARM_MS);
-      meshSetSirenActive(true);
-    }
-  }
-  if (requireSiren)
-    meshSendAck(msgId, src, "siren");
-}
-
-void meshHandleSmsRequest(JsonObject payload, const String &src, uint64_t msgId)
-{
-  if (payload.isNull())
-    return;
-  if (!meshShouldHandleSmsRequest(src))
-    return;
-  if (std::find(g_handledSmsRequests.begin(), g_handledSmsRequests.end(), msgId) != g_handledSmsRequests.end())
-    return;
-  String numbers = payload["nums"].as<String>();
-  String text = payload["text"].as<String>();
-  if (!numbers.length() || !text.length())
-    return;
-  int priority = payload["priority"] | 1;
-  int start = 0;
-  while (true)
-  {
-    int idx = numbers.indexOf(',', start);
-    String number = numbers.substring(start, idx == -1 ? numbers.length() : idx);
-    number.trim();
-    if (number.length())
-      enqueueSms(number, text, priority);
-    if (idx == -1)
-      break;
-    start = idx + 1;
-  }
-  g_handledSmsRequests.push_back(msgId);
-  if (g_handledSmsRequests.size() > 32)
-    g_handledSmsRequests.erase(g_handledSmsRequests.begin());
-  meshSendAck(msgId, src, "sms");
-}
-
 uint64_t meshPublish(const char *type,
                      const std::function<void(JsonObject &payload)> &builder,
                      bool requiresAck,
@@ -849,7 +845,15 @@ uint64_t meshPublish(const char *type,
     logToSerial("[MESH] payload too big, drop.", true);
     return 0;
   }
-  g_meshOutbox.push_back({id, String(type), serialized, requiresAck, minAckCount, 0, 0});
+  MeshOutgoingPacket pkt;
+  pkt.id = id;
+  pkt.type = String(type);
+  pkt.serialized = serialized;
+  pkt.requiresAck = requiresAck;
+  pkt.minAckCount = minAckCount;
+  pkt.retries = 0;
+  pkt.lastSendMs = 0;
+  g_meshOutbox.push_back(pkt);
   MeshMessageRecord rec;
   rec.id = id;
   rec.type = type;
@@ -2325,7 +2329,7 @@ void HtmlFunctions()
     if (!json.is<JsonObject>()) { request->send(400,"application/json","{\"error\":\"         JSON                      \"}"); return; }
     JsonObject obj = json.as<JsonObject>();
     unsigned long long timestamp = obj["timestamp"]; // ms
-    logToSerial("browser time ", false); logToSerial((unsigned long long)timestamp);
+    logToSerial("browser time ", false); logToSerial(String((unsigned long long)timestamp));
 
     prefs.putULong("epochStartTime", (unsigned long)timestamp);
     epochStartTime = (unsigned long)timestamp;
@@ -3618,6 +3622,54 @@ void smTick(BlinkSM &sm)
     sm.lastToggle = now;
     digitalWrite(sm.pin, sm.level ? HIGH : LOW);
   }
+}
+
+void meshHandleAlarm(JsonObject payload, const String &src, uint64_t msgId)
+{
+  if (payload.isNull())
+    return;
+  bool requireSiren = payload["reqSir"] | 1;
+  if (requireSiren && DEVICE_HAS_SIREN && public_AlertEnabled_Buzzer)
+  {
+    if (!buzzSM.active)
+    {
+      smStart(buzzSM, 500, 500, BUZZER_ALARM_MS);
+      meshSetSirenActive(true);
+    }
+  }
+  if (requireSiren)
+    meshSendAck(msgId, src, "siren");
+}
+
+void meshHandleSmsRequest(JsonObject payload, const String &src, uint64_t msgId)
+{
+  if (payload.isNull())
+    return;
+  if (!meshShouldHandleSmsRequest(src))
+    return;
+  if (std::find(g_handledSmsRequests.begin(), g_handledSmsRequests.end(), msgId) != g_handledSmsRequests.end())
+    return;
+  String numbers = payload["nums"].as<String>();
+  String text = payload["text"].as<String>();
+  if (!numbers.length() || !text.length())
+    return;
+  int priority = payload["priority"] | 1;
+  int start = 0;
+  while (true)
+  {
+    int idx = numbers.indexOf(',', start);
+    String number = numbers.substring(start, idx == -1 ? numbers.length() : idx);
+    number.trim();
+    if (number.length())
+      enqueueSms(number, text, priority);
+    if (idx == -1)
+      break;
+    start = idx + 1;
+  }
+  g_handledSmsRequests.push_back(msgId);
+  if (g_handledSmsRequests.size() > 32)
+    g_handledSmsRequests.erase(g_handledSmsRequests.begin());
+  meshSendAck(msgId, src, "sms");
 }
 
 //                                                     

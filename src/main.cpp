@@ -986,7 +986,8 @@ uint64_t meshPublish(const char *type,
   serializeJson(root, serialized);
   if (serialized.length() >= 235)
   {
-    logToSerial("[MESH] payload too big, drop.", true);
+    logToSerialf("[MESH] payload too big (%u bytes) for type=%s, drop.\n",
+                 (unsigned)serialized.length(), type);
     return 0;
   }
   MeshOutgoingPacket pkt;
@@ -1365,18 +1366,18 @@ void meshSendStateSnapshot(const String &target)
                 for (auto &node : g_meshNodes)
                 {
                   JsonObject obj = nodes.createNestedObject();
-                  obj["id"] = node.id;
-                  obj["caps"] = node.caps;
-                  obj["on"] = node.online ? 1 : 0;
-                  obj["busy"] = node.simBusy ? 1 : 0;
-                  obj["sir"] = node.sirenActive ? 1 : 0;
-                  obj["ts"] = (uint64_t)node.lastSeenMs;
-                  obj["tv"] = node.timeVersion;
+                  obj["i"] = node.id;
+                  obj["c"] = node.caps;
+                  obj["o"] = node.online ? 1 : 0;
+                  obj["b"] = node.simBusy ? 1 : 0;
+                  obj["s"] = node.sirenActive ? 1 : 0;
+                  obj["t"] = (uint64_t)node.lastSeenMs;
+                  obj["v"] = node.timeVersion;
                   if (node.apSsid.length())
-                    obj["ap"] = node.apSsid;
+                    obj["a"] = node.apSsid;
                   if (node.apPassword.length())
-                    obj["apPw"] = node.apPassword;
-                  if (++nodeCount >= 3)
+                    obj["p"] = node.apPassword;
+                  if (++nodeCount >= 2)
                     break;
                 }
                 JsonArray msgs = payload.createNestedArray("m");
@@ -1384,11 +1385,11 @@ void meshSendStateSnapshot(const String &target)
                 for (auto it = g_meshMessageLog.rbegin(); it != g_meshMessageLog.rend(); ++it)
                 {
                   JsonObject obj = msgs.createNestedObject();
-                  obj["id"] = it->id;
-                  obj["type"] = it->type;
-                  obj["ts"] = (uint64_t)it->timestamp;
-                  obj["status"] = it->status;
-                  if (++msgCount >= 4)
+                  obj["i"] = it->id;
+                  obj["y"] = it->type;
+                  obj["t"] = (uint64_t)it->timestamp;
+                  obj["s"] = it->status;
+                  if (++msgCount >= 2)
                     break;
                 }
               },
@@ -1406,15 +1407,31 @@ void meshHandleStateSnapshot(JsonObject payload)
   {
     for (JsonObject obj : payload["n"].as<JsonArray>())
     {
-      MeshNodeInfo &node = ensureMeshNode(obj["id"].as<String>());
-      node.caps = obj["caps"] | node.caps;
-      node.online = obj["on"] | 0;
-      node.simBusy = obj["busy"] | 0;
-      node.sirenActive = obj["sir"] | 0;
-      node.lastSeenMs = obj["ts"] | node.lastSeenMs;
-      node.timeVersion = obj["tv"] | node.timeVersion;
+      String nodeId = obj.containsKey("i") ? obj["i"].as<String>() : obj["id"].as<String>();
+      MeshNodeInfo &node = ensureMeshNode(nodeId);
+      node.caps = obj.containsKey("c") ? (obj["c"] | node.caps) : (obj["caps"] | node.caps);
+      node.online = obj.containsKey("o") ? (obj["o"] | 0) : (obj["on"] | 0);
+      node.simBusy = obj.containsKey("b") ? (obj["b"] | 0) : (obj["busy"] | 0);
+      node.sirenActive = obj.containsKey("s") ? (obj["s"] | 0) : (obj["sir"] | 0);
+      if (obj.containsKey("t"))
+        node.lastSeenMs = obj["t"] | node.lastSeenMs;
+      else if (obj.containsKey("ts"))
+        node.lastSeenMs = obj["ts"] | node.lastSeenMs;
+      if (obj.containsKey("v"))
+        node.timeVersion = obj["v"] | node.timeVersion;
+      else if (obj.containsKey("tv"))
+        node.timeVersion = obj["tv"] | node.timeVersion;
       bool updatedAp = false;
-      if (obj.containsKey("ap"))
+      if (obj.containsKey("a"))
+      {
+        String ap = obj["a"].as<String>();
+        if (ap.length() && ap != node.apSsid)
+        {
+          node.apSsid = ap;
+          updatedAp = true;
+        }
+      }
+      else if (obj.containsKey("ap"))
       {
         String ap = obj["ap"].as<String>();
         if (ap.length() && ap != node.apSsid)
@@ -1423,7 +1440,16 @@ void meshHandleStateSnapshot(JsonObject payload)
           updatedAp = true;
         }
       }
-      if (obj.containsKey("apPw"))
+      if (obj.containsKey("p"))
+      {
+        String pw = obj["p"].as<String>();
+        if (pw.length() && pw != node.apPassword)
+        {
+          node.apPassword = pw;
+          updatedAp = true;
+        }
+      }
+      else if (obj.containsKey("apPw"))
       {
         String pw = obj["apPw"].as<String>();
         if (pw.length() && pw != node.apPassword)
@@ -1446,15 +1472,15 @@ void meshHandleStateSnapshot(JsonObject payload)
   {
     for (JsonObject obj : payload["m"].as<JsonArray>())
     {
-      uint64_t id = obj["id"] | 0;
+      uint64_t id = obj.containsKey("i") ? (uint64_t)(obj["i"] | 0) : (obj["id"] | 0);
       if (findMeshMessage(id))
         continue;
       MeshMessageRecord rec;
       rec.id = id;
-      rec.type = obj["type"].as<String>();
+      rec.type = obj.containsKey("y") ? obj["y"].as<String>() : obj["type"].as<String>();
       rec.origin = "snapshot";
-      rec.timestamp = obj["ts"] | deviceUnixNowMs();
-      rec.status = obj["status"].as<String>();
+      rec.timestamp = obj.containsKey("t") ? (obj["t"] | deviceUnixNowMs()) : (obj["ts"] | deviceUnixNowMs());
+      rec.status = obj.containsKey("s") ? obj["s"].as<String>() : obj["status"].as<String>();
       meshAppendLog(rec);
     }
   }

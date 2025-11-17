@@ -287,6 +287,9 @@ void meshCheckOffline();
 void meshHandleHeartbeat(JsonObject payload, const String &src);
 void meshHandleAlarm(JsonObject payload, const String &src, uint64_t msgId);
 void meshHandleSmsRequest(JsonObject payload, const String &src, uint64_t msgId);
+void meshHandleTestPing(JsonObject payload, const String &src);
+void meshSendTestPing(const char *reason);
+void meshTestPingTick();
 
 
 void meshHandleTimeUpdate(JsonObject payload, const String &src);
@@ -375,6 +378,8 @@ bool g_remoteStateReady = false;
 bool g_sirenActiveFlag = false;
 bool g_lastSimBusy = false;
 uint32_t g_localHeartbeatSeq = 0;
+uint32_t g_lastMeshTestPingMs = 0;
+bool g_meshBootPingSent = false;
 uint8_t g_meshBroadcastAddr[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 uint32_t g_meshTimeVersion = 0;
 String g_lastTimeAuthority = g_selfNodeId;
@@ -1100,6 +1105,8 @@ void meshOnDataRecv(const uint8_t *mac, const uint8_t *data, int len)
       meshHandleAlarm(payload, src, msgId);
     else if (type == "sr")
       meshHandleSmsRequest(payload, src, msgId);
+    else if (type == "tp")
+      meshHandleTestPing(payload, src);
     else if (type == "tm")
       meshHandleTimeUpdate(payload, src);
     else if (type == "sb")
@@ -1169,6 +1176,7 @@ void meshLoop()
     g_lastMeshHealthCheck = now;
     meshCheckOffline();
   }
+  meshTestPingTick();
   meshProcessOutbox();
   meshPruneSeen();
   meshPruneMessageLog();
@@ -1274,6 +1282,44 @@ void meshSendHeartbeat()
               false,
               0,
               "");
+}
+
+void meshSendTestPing(const char *reason)
+{
+  if (!g_meshInitDone)
+    return;
+  if (!reason || !reason[0])
+    reason = "manual";
+  meshPublish("tp",
+              [&](JsonObject &payload)
+              {
+                payload["n"] = g_selfNodeId;
+                payload["r"] = reason;
+                payload["m"] = (uint32_t)millis();
+              },
+              false,
+              0,
+              "");
+  logToSerialf("[TEST] send ping reason=%s\n", reason);
+}
+
+void meshTestPingTick()
+{
+  if (!g_meshInitDone)
+    return;
+  uint32_t now = millis();
+  if (!g_meshBootPingSent)
+  {
+    meshSendTestPing("boot");
+    g_meshBootPingSent = true;
+    g_lastMeshTestPingMs = now;
+    return;
+  }
+  if (now - g_lastMeshTestPingMs >= 5000)
+  {
+    meshSendTestPing("periodic");
+    g_lastMeshTestPingMs = now;
+  }
 }
 
 void meshCheckOffline()
@@ -3920,6 +3966,17 @@ void meshHandleSmsRequest(JsonObject payload, const String &src, uint64_t msgId)
   if (g_handledSmsRequests.size() > 32)
     g_handledSmsRequests.erase(g_handledSmsRequests.begin());
   meshSendAck(msgId, src, "sms");
+}
+
+void meshHandleTestPing(JsonObject payload, const String &src)
+{
+  if (payload.isNull())
+    return;
+  String origin = payload.containsKey("n") ? payload["n"].as<String>() : src;
+  String reason = payload.containsKey("r") ? payload["r"].as<String>() : "";
+  uint32_t sentMs = payload["m"] | 0;
+  logToSerialf("[TEST] rx ping src=%s origin=%s reason=%s ms=%u\n",
+               src.c_str(), origin.c_str(), reason.c_str(), (unsigned)sentMs);
 }
 
 //                                                     

@@ -1,4 +1,4 @@
-﻿#include <AsyncJson.h>
+#include <AsyncJson.h>
 #include <Arduino.h>
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
@@ -39,6 +39,8 @@ extern String g_selfNodeId;
 extern String g_meshNetworkName;
 extern uint8_t meshChannel;
 extern uint32_t g_meshNetworkFingerprint;
+extern String ssidName;
+extern String ssidPassword;
 // Lightweight logging helper toggled via IsMonitoring flag.
 void logToSerial(const String &text, bool goToNewLine = true)
 {
@@ -315,6 +317,8 @@ struct MeshNodeInfo
   uint64_t lastSeenMs = 0;
   bool online = false;
   std::vector<String> neighbors;
+  String apSsid;
+  String apPassword;
 };
 
 struct MeshMessageRecord
@@ -567,6 +571,10 @@ static void buildMeshCachePayload(size_t nodeLimit,
     obj["hb"] = node.heartbeatSeq;
     obj["tv"] = node.timeVersion;
     obj["ts"] = (uint64_t)node.lastSeenMs;
+    if (node.apSsid.length())
+      obj["ap"] = node.apSsid;
+    if (node.apPassword.length())
+      obj["apPw"] = node.apPassword;
     JsonArray neigh = obj.createNestedArray("nb");
     for (auto &n : node.neighbors)
       neigh.add(n);
@@ -688,6 +696,10 @@ void meshLoadPersistedState()
       info.timeVersion = obj["tv"] | 0;
       info.lastSeenMs = obj["ts"] | 0;
       info.online = false;
+      if (obj.containsKey("ap"))
+        info.apSsid = obj["ap"].as<String>();
+      if (obj.containsKey("apPw"))
+        info.apPassword = obj["apPw"].as<String>();
       if (obj.containsKey("nb"))
         for (JsonVariant v : obj["nb"].as<JsonArray>())
           info.neighbors.push_back(v.as<String>());
@@ -826,6 +838,26 @@ void meshHandleHeartbeat(JsonObject payload, const String &src)
   node.timeVersion = payload["tv"] | node.timeVersion;
   node.lastSeenMs = deviceUnixNowMs();
   node.online = true;
+  String apName = payload.containsKey("ap") ? payload["ap"].as<String>() : "";
+  String apPass = payload.containsKey("apPw") ? payload["apPw"].as<String>() : "";
+  bool updatedAp = false;
+  if (apName.length() && apName != node.apSsid)
+  {
+    node.apSsid = apName;
+    updatedAp = true;
+  }
+  if (apPass.length() && apPass != node.apPassword)
+  {
+    node.apPassword = apPass;
+    updatedAp = true;
+  }
+  if (updatedAp && node.apSsid.length())
+  {
+    logToSerialf("[MESH/NODE] %s SoftAP='%s' pass='%s'\n",
+                 node.id.c_str(),
+                 node.apSsid.c_str(),
+                 node.apPassword.length() ? node.apPassword.c_str() : "unknown");
+  }
   g_meshStateDirty = true;
 }
 
@@ -1176,6 +1208,8 @@ void meshSendHeartbeat()
   self.sirenActive = g_sirenActiveFlag;
   self.timeVersion = g_meshTimeVersion;
   self.heartbeatSeq = ++g_localHeartbeatSeq;
+  self.apSsid = ssidName;
+  self.apPassword = ssidPassword;
   g_meshStateDirty = true;
   meshPublish("hb",
               [&](JsonObject &payload)
@@ -1187,6 +1221,8 @@ void meshSendHeartbeat()
                 payload["sAct"] = g_sirenActiveFlag ? 1 : 0;
                 payload["hb"] = g_localHeartbeatSeq;
                 payload["tv"] = g_meshTimeVersion;
+                payload["ap"] = ssidName;
+                payload["apPw"] = ssidPassword;
               },
               false,
               0,
@@ -1285,6 +1321,10 @@ void meshSendStateSnapshot(const String &target)
                   obj["sir"] = node.sirenActive ? 1 : 0;
                   obj["ts"] = (uint64_t)node.lastSeenMs;
                   obj["tv"] = node.timeVersion;
+                  if (node.apSsid.length())
+                    obj["ap"] = node.apSsid;
+                  if (node.apPassword.length())
+                    obj["apPw"] = node.apPassword;
                   if (++nodeCount >= 3)
                     break;
                 }
@@ -1321,6 +1361,32 @@ void meshHandleStateSnapshot(JsonObject payload)
       node.sirenActive = obj["sir"] | 0;
       node.lastSeenMs = obj["ts"] | node.lastSeenMs;
       node.timeVersion = obj["tv"] | node.timeVersion;
+      bool updatedAp = false;
+      if (obj.containsKey("ap"))
+      {
+        String ap = obj["ap"].as<String>();
+        if (ap.length() && ap != node.apSsid)
+        {
+          node.apSsid = ap;
+          updatedAp = true;
+        }
+      }
+      if (obj.containsKey("apPw"))
+      {
+        String pw = obj["apPw"].as<String>();
+        if (pw.length() && pw != node.apPassword)
+        {
+          node.apPassword = pw;
+          updatedAp = true;
+        }
+      }
+      if (updatedAp && node.apSsid.length())
+      {
+        logToSerialf("[MESH/NODE] %s SoftAP='%s' pass='%s' (snapshot)\n",
+                     node.id.c_str(),
+                     node.apSsid.c_str(),
+                     node.apPassword.length() ? node.apPassword.c_str() : "unknown");
+      }
     }
     g_meshStateDirty = true;
   }
@@ -1607,7 +1673,7 @@ R"rawliteral(
     <h2>Temperature & Humidity (DHT)</h2>
     <div>
       <strong>Current:</strong>
-      <span id="dhtTemp">-</span> °C,
+      <span id="dhtTemp">-</span> �C,
       <small>Humidity: <span id="dhtHum">-</span> %</small>
       <small style="margin-left:8px;">(Temp range: <span id="dhtRange">-</span>)</small>
     </div>
@@ -1727,10 +1793,15 @@ R"rawliteral(
     await loadGas();
 )rawliteral"
 #endif
+#if HAS_DHT
+R"rawliteral(
+    await loadDht();
+)rawliteral"
+#endif
 R"rawliteral(
     setInterval(loadSmsLog, 3000);
     setInterval(loadInboxLog, 5000);
-  )rawliteral"
+)rawliteral"
 #if HAS_GAS
 R"rawliteral(
     setInterval(loadGas, 2000);
@@ -1738,21 +1809,10 @@ R"rawliteral(
 #endif
 #if HAS_DHT
 R"rawliteral(
-    await loadDht();
     setInterval(loadDht, 2000);
-    /*
-)rawliteral"
-#endif
-#if HAS_DHT
-R"rawliteral(
-  <div class="card">
-    <h2>Temperature (DHT)</h2>
-    <div><strong>Current:</strong> <span id="dhtTemp">-</span> °C <small>(Range: <span id="dhtRange">-</span>)</small></div>
-  </div>
 )rawliteral"
 #endif
 R"rawliteral(
-    */
   }else{
     $('err').textContent = res.error || 'Invalid username or password';
   }
@@ -1958,65 +2018,7 @@ function toggleHelp(){
   if (!card.classList.contains('hidden')) renderHelp();
 }
 
-/*
-async function loadGas(){
-  try{
-    const d = await api('/gas');
-    const v = document.getElementById('gasVal');
-    const r = document.getElementById('gasRange');
-    if (!v || !r) return;
-    if (!d || !d.success){ v.textContent = '   '; r.textContent = '   '; return; }
-async function loadDht(){
-  try{
-    const d = await api('/dht');
-    const t = document.getElementById('dhtTemp');
-    const r = document.getElementById('dhtRange');
-    if (!t || !r) return;
-    if (!d || !d.success){ t.textContent = '—'; r.textContent = '—'; return; }
-    const tempStr = (typeof d.t === 'number') ? d.t.toFixed(1) : d.t;
-    t.textContent = tempStr;
-    r.textContent = d.min + '..' + d.max;
-    const updLabel = (key) => {
-      const inp = document.getElementById('i-'+key);
-      if (!inp) return;
-      const container = inp.parentElement;
-      if (!container) return;
-      let small = container.querySelector('small.temp-live');
-      if (!small) {
-        small = document.createElement('small');
-        small.className = 'temp-live';
-        small.style.marginRight = '8px';
-        container.appendChild(small);
-      }
-      small.textContent = 'Now: ' + tempStr + ' °C';
-    };
-    updLabel('TempMin');
-    updLabel('TempMax');
-  }catch(e){}
-}
-    v.textContent = d.value;
-    r.textContent = d.min + '..' + d.max;
 
-    // Update live labels next to GasMin/GasMax inputs
-    const updLabel = (key) => {
-      const inp = document.getElementById('i-'+key);
-      if (!inp) return;
-      const container = inp.parentElement;
-      if (!container) return;
-      let small = container.querySelector('small.gas-live');
-      if (!small) {
-        small = document.createElement('small');
-        small.className = 'gas-live';
-        small.style.marginRight = '8px';
-        container.appendChild(small);
-      }
-      small.textContent = 'Now: ' + d.value;
-    };
-    updLabel('GasMin');
-    updLabel('GasMax');
-  }catch(e){}
-}
-*/
 
  //                                                    (                                                HTML)
   function fixTitles(){
@@ -4323,6 +4325,12 @@ void loop()
   meshSetSirenActive(buzzSM.active);
   meshLoop();
 }
+
+
+
+
+
+
 
 
 

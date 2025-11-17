@@ -41,6 +41,7 @@ extern uint8_t meshChannel;
 extern uint32_t g_meshNetworkFingerprint;
 extern String ssidName;
 extern String ssidPassword;
+extern String meshSsid;
 // Lightweight logging helper toggled via IsMonitoring flag.
 void logToSerial(const String &text, bool goToNewLine = true)
 {
@@ -1231,6 +1232,8 @@ bool meshEnsureRadio()
     logToSerialf("[MESH] add peer failed %d\n", addStatus);
     return false;
   }
+  logToSerialf("[MESH] radio ready (ch=%u ssid=%s fingerprint=%08X)\n",
+               meshChannel, meshSsid.c_str(), (unsigned)g_meshNetworkFingerprint);
   return true;
 }
 

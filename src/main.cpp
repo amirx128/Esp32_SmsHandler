@@ -265,6 +265,9 @@ const uint8_t MESH_MAX_RETRIES = 5;
 const uint8_t MESH_DEFAULT_TTL = 8;
 const size_t MESH_MAX_MESSAGE_LOG = 48;
 const char *MESH_CACHE_KEY = "mesh_cache";
+constexpr size_t MESH_CACHE_MAX_BYTES = 1800;
+constexpr size_t MESH_CACHE_MAX_NODES = 16;
+constexpr size_t MESH_CACHE_MAX_MESSAGES = 24;
 
 // Forward declarations for mesh helpers
 uint64_t meshPublish(const char *type,
@@ -542,14 +545,20 @@ void meshRecordAck(uint64_t id, const String &nodeId)
   }
 }
 
-void meshPersistState()
+static void buildMeshCachePayload(size_t nodeLimit,
+                                  size_t messageLimit,
+                                  String &out,
+                                  size_t &writtenNodes,
+                                  size_t &writtenMessages)
 {
-  if (!g_meshStateDirty)
-    return;
   DynamicJsonDocument doc(8192);
   JsonArray nodes = doc.createNestedArray("nodes");
-  for (auto &node : g_meshNodes)
+  size_t totalNodes = g_meshNodes.size();
+  size_t startNode = (nodeLimit < totalNodes) ? (totalNodes - nodeLimit) : 0;
+  writtenNodes = 0;
+  for (size_t i = startNode; i < totalNodes; ++i)
   {
+    auto &node = g_meshNodes[i];
     JsonObject obj = nodes.createNestedObject();
     obj["id"] = node.id;
     obj["caps"] = node.caps;
@@ -561,10 +570,16 @@ void meshPersistState()
     JsonArray neigh = obj.createNestedArray("nb");
     for (auto &n : node.neighbors)
       neigh.add(n);
+    ++writtenNodes;
   }
+
   JsonArray msgs = doc.createNestedArray("messages");
-  for (auto &msg : g_meshMessageLog)
+  size_t totalMessages = g_meshMessageLog.size();
+  size_t startMessage = (messageLimit < totalMessages) ? (totalMessages - messageLimit) : 0;
+  writtenMessages = 0;
+  for (size_t i = startMessage; i < totalMessages; ++i)
   {
+    auto &msg = g_meshMessageLog[i];
     JsonObject obj = msgs.createNestedObject();
     obj["id"] = msg.id;
     obj["type"] = msg.type;
@@ -580,14 +595,75 @@ void meshPersistState()
     JsonArray ack = obj.createNestedArray("acks");
     for (auto &n : msg.ackedNodes)
       ack.add(n);
+    ++writtenMessages;
   }
+
   doc["timeVersion"] = g_meshTimeVersion;
   doc["timeAuthority"] = g_lastTimeAuthority;
-  String out;
+  out.clear();
   serializeJson(doc, out);
-  prefs.putString(MESH_CACHE_KEY, out);
+}
+
+void meshPersistState()
+{
+  if (!g_meshStateDirty)
+    return;
+  size_t nodeLimit = std::min(g_meshNodes.size(), (size_t)MESH_CACHE_MAX_NODES);
+  size_t messageLimit = std::min(g_meshMessageLog.size(), (size_t)MESH_CACHE_MAX_MESSAGES);
+  String out;
+  size_t storedNodes = 0;
+  size_t storedMessages = 0;
+  bool trimmed = (nodeLimit < g_meshNodes.size()) || (messageLimit < g_meshMessageLog.size());
+
+  while (true)
+  {
+    buildMeshCachePayload(nodeLimit, messageLimit, out, storedNodes, storedMessages);
+    if (out.length() <= MESH_CACHE_MAX_BYTES || (nodeLimit == 0 && messageLimit == 0))
+      break;
+
+    if (messageLimit > 0)
+    {
+      --messageLimit;
+      trimmed = true;
+      continue;
+    }
+    if (nodeLimit > 0)
+    {
+      --nodeLimit;
+      trimmed = true;
+      continue;
+    }
+    break;
+  }
+
+  if (out.length() > MESH_CACHE_MAX_BYTES)
+  {
+    logToSerialf("[MESH/PERSIST] skip write: payload=%u bytes > limit=%u (nodes=%u msgs=%u)\n",
+                 (unsigned)out.length(), (unsigned)MESH_CACHE_MAX_BYTES,
+                 (unsigned)storedNodes, (unsigned)storedMessages);
+    return;
+  }
+
+  size_t written = prefs.putString(MESH_CACHE_KEY, out);
+  if (written == 0)
+  {
+    logToSerialf("[MESH/PERSIST] NVS write failed (len=%u). Clearing key & retrying.\n", (unsigned)out.length());
+    prefs.remove(MESH_CACHE_KEY);
+    written = prefs.putString(MESH_CACHE_KEY, out);
+    if (written == 0)
+    {
+      logToSerialf("[MESH/PERSIST] NVS write failed after retry (len=%u). Skip persist this round.\n", (unsigned)out.length());
+      return;
+    }
+  }
+
   g_meshStateDirty = false;
   g_lastMeshPersistMs = millis();
+  if (trimmed)
+  {
+    logToSerialf("[MESH/PERSIST] trimmed data -> %u nodes, %u msgs (%u bytes)\n",
+                 (unsigned)storedNodes, (unsigned)storedMessages, (unsigned)out.length());
+  }
 }
 
 void meshLoadPersistedState()
@@ -3732,23 +3808,24 @@ void PollSensorsAndDecide()
   bool tempAlarmNow = false;
   bool humAlarmNow  = false;
 #if HAS_GAS
-  static uint32_t _lastGasLog = 0;
   int gasRaw = analogRead(GasAnalogPin);
   public_GasValue = (public_GasValue * 7 + gasRaw) / 8;
   if (public_GasEnabled) {
     gasAlarmNow = (public_GasValue < public_GasMin) || (public_GasValue > public_GasMax);
   }
-  if (millis() - _lastGasLog > 1000) {
-    _lastGasLog = millis();
-    logToSerialf("[GAS/TICK] pin=%d raw=%d filtered=%d range=[%d,%d] enabled=%d\n",
-                  GasAnalogPin, gasRaw, public_GasValue, public_GasMin, public_GasMax, (int)public_GasEnabled);
+  static bool prevGasAlarm = false;
+  if (gasAlarmNow != prevGasAlarm)
+  {
+    logToSerialf("[GAS ] %s (filtered=%d range=[%d,%d] enabled=%d)\n",
+                 gasAlarmNow ? "ALARM" : "normal",
+                 public_GasValue, public_GasMin, public_GasMax, (int)public_GasEnabled);
+    prevGasAlarm = gasAlarmNow;
   }
 #endif
 
 #if HAS_DHT
   // Periodic DHT read + log (independent of Arm state)
   static uint32_t _lastDhtRead = 0;
-  static uint32_t _lastDhtLog  = 0;
   if (public_DhtEnabled && (millis() - _lastDhtRead > 2000)) {
     float t = dht.readTemperature();
     float h = dht.readHumidity();
@@ -3756,14 +3833,25 @@ void PollSensorsAndDecide()
     if (!isnan(h)) public_HumValue  = h;
     _lastDhtRead = millis();
   }
-  if (millis() - _lastDhtLog > 2000) {
-    _lastDhtLog = millis();
-    logToSerialf("[DHT/TICK] pin=%d t=%.1fC h=%.0f%% range=[%d,%d] enabled=%d\n",
-                  DHT_PIN, public_TempValue, public_HumValue, public_TempMin, public_TempMax, (int)public_DhtEnabled);
-  }
   if (public_DhtEnabled) {
     tempAlarmNow = (public_TempValue < public_TempMin) || (public_TempValue > public_TempMax);
     humAlarmNow  = (public_HumValue  < public_HumMin)  || (public_HumValue  > public_HumMax);
+  }
+  static bool prevTempAlarm = false;
+  static bool prevHumAlarm = false;
+  if (tempAlarmNow != prevTempAlarm)
+  {
+    logToSerialf("[TEMP] %s (%.1fC range=[%d,%d] enabled=%d)\n",
+                 tempAlarmNow ? "ALARM" : "normal",
+                 public_TempValue, public_TempMin, public_TempMax, (int)public_DhtEnabled);
+    prevTempAlarm = tempAlarmNow;
+  }
+  if (humAlarmNow != prevHumAlarm)
+  {
+    logToSerialf("[HUM ] %s (%d%% range=[%d,%d] enabled=%d)\n",
+                 humAlarmNow ? "ALARM" : "normal",
+                 (int)public_HumValue, public_HumMin, public_HumMax, (int)public_DhtEnabled);
+    prevHumAlarm = humAlarmNow;
   }
 #endif
 
@@ -3791,9 +3879,20 @@ void PollSensorsAndDecide()
 
   int32_t cooldownLeft = (alarmCooldownUntilMs > now) ? (int32_t)(alarmCooldownUntilMs - now) : 0;
 
-  logToSerialf("[SENS] t=%lu ms | vibPin=%d pirPin=%d | V=%u P=%u | LED=%d BUZZ=%d | cooldownLeft=%ld ms\n",
-                (unsigned long)now, vibState, pirState, V, P,
-                (int)ledSM.active, (int)buzzSM.active, (long)cooldownLeft);
+  static uint8_t lastLoggedV = 255;
+  static uint8_t lastLoggedP = 255;
+  static bool lastLoggedAlarm = false;
+  bool alarmNow = shouldAlarm(V, P) || gasAlarmNow || tempAlarmNow || humAlarmNow;
+  bool shouldLogSensors = (V != lastLoggedV) || (P != lastLoggedP) || (alarmNow != lastLoggedAlarm);
+  if (shouldLogSensors)
+  {
+    logToSerialf("[SENS] t=%lu ms | vibPin=%d pirPin=%d | V=%u P=%u | LED=%d BUZZ=%d | cooldownLeft=%ld ms\n",
+                 (unsigned long)now, vibState, pirState, V, P,
+                 (int)ledSM.active, (int)buzzSM.active, (long)cooldownLeft);
+    lastLoggedV = V;
+    lastLoggedP = P;
+    lastLoggedAlarm = alarmNow;
+  }
 
   if (V != prevV || P != prevP)
   {
@@ -3803,7 +3902,6 @@ void PollSensorsAndDecide()
     prevP = P;
   }
 
-  bool alarmNow = shouldAlarm(V, P) || gasAlarmNow || tempAlarmNow || humAlarmNow;
   if (alarmNow)
   {
     bool c1 = (V >= 4) || (P >= 4);

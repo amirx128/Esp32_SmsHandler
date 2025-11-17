@@ -15,7 +15,7 @@
 #endif
 
 #ifndef GAS_PIN
-#define GAS_PIN 35   // MQ gas sensor (analog input)
+#define GAS_PIN 0   // MQ gas sensor (analog input)
 #endif
 
 // Capabilities derived from pin presence (0 = not present)
@@ -25,7 +25,7 @@
 
 // DHT temperature/humidity sensor (digital, bidirectional)
 #ifndef DHT_PIN
-#define DHT_PIN 4    // set to a valid GPIO (not 34-39). 0 = disabled
+#define DHT_PIN 0    // set to a valid GPIO (not 34-39). 0 = disabled
 #endif
 
 #ifndef DHT_TYPE

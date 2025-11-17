@@ -1040,8 +1040,14 @@ void meshOnDataRecv(const uint8_t *mac, const uint8_t *data, int len)
   if (!msgId || !type.length() || !src.length() || src == g_selfNodeId)
     return;
   uint32_t net = root["net"] | 0;
+  logToSerialf("[MESH/RX] type=%s id=%llu from=%s net=%08X len=%d\n",
+               type.c_str(), (unsigned long long)msgId, src.c_str(), (unsigned)net, len);
   if (g_meshNetworkFingerprint && net && net != g_meshNetworkFingerprint)
+  {
+    logToSerialf("[MESH/RX] drop fingerprint mismatch (%08X vs %08X)\n",
+                 (unsigned)net, (unsigned)g_meshNetworkFingerprint);
     return;
+  }
   String target = root["tg"].as<String>();
   bool targeted = target.length() > 0;
   bool forMe = !targeted || target == g_selfNodeId;
@@ -1080,7 +1086,10 @@ void meshOnDataRecv(const uint8_t *mac, const uint8_t *data, int len)
     }
   }
   if (alreadySeen && !forMe)
+  {
+    logToSerialf("[MESH/RX] skip id=%llu already seen (not for me)\n", (unsigned long long)msgId);
     return;
+  }
   if (forMe)
   {
     JsonObject payload = root.containsKey("p") ? root["p"].as<JsonObject>() : JsonObject();

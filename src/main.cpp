@@ -858,17 +858,17 @@ void meshHandleHeartbeat(JsonObject payload, const String &src)
     return;
   MeshNodeInfo &node = ensureMeshNode(src);
   bool wasOnline = node.online;
-  node.caps = payload["caps"] | node.caps;
-  node.simBusy = payload["busy"] | node.simBusy;
-  node.sirenActive = payload["sAct"] | node.sirenActive;
-  node.heartbeatSeq = payload["hb"] | node.heartbeatSeq;
-  node.timeVersion = payload["tv"] | node.timeVersion;
+  node.caps = payload.containsKey("c") ? (payload["c"] | node.caps) : (payload["caps"] | node.caps);
+  node.simBusy = payload.containsKey("b") ? (payload["b"] | node.simBusy) : (payload["busy"] | node.simBusy);
+  node.sirenActive = payload.containsKey("r") ? (payload["r"] | node.sirenActive) : (payload["sAct"] | node.sirenActive);
+  node.heartbeatSeq = payload.containsKey("h") ? (payload["h"] | node.heartbeatSeq) : (payload["hb"] | node.heartbeatSeq);
+  node.timeVersion = payload.containsKey("v") ? (payload["v"] | node.timeVersion) : (payload["tv"] | node.timeVersion);
   node.lastSeenMs = deviceUnixNowMs();
   node.online = true;
   if (!wasOnline)
     logToSerialf("[MESH/NODE] %s is online\n", src.c_str());
-  String apName = payload.containsKey("ap") ? payload["ap"].as<String>() : "";
-  String apPass = payload.containsKey("apPw") ? payload["apPw"].as<String>() : "";
+  String apName = payload.containsKey("a") ? payload["a"].as<String>() : (payload.containsKey("ap") ? payload["ap"].as<String>() : "");
+  String apPass = payload.containsKey("p") ? payload["p"].as<String>() : (payload.containsKey("apPw") ? payload["apPw"].as<String>() : "");
   bool updatedAp = false;
   if (apName.length() && apName != node.apSsid)
   {
@@ -1263,15 +1263,13 @@ void meshSendHeartbeat()
   meshPublish("hb",
               [&](JsonObject &payload)
               {
-                payload["caps"] = g_localCapabilityMask;
-                payload["busy"] = g_lastSimBusy ? 1 : 0;
-                payload["sir"] = DEVICE_HAS_SIREN ? 1 : 0;
-                payload["sim"] = DEVICE_HAS_SIM ? 1 : 0;
-                payload["sAct"] = g_sirenActiveFlag ? 1 : 0;
-                payload["hb"] = g_localHeartbeatSeq;
-                payload["tv"] = g_meshTimeVersion;
-                payload["ap"] = ssidName;
-                payload["apPw"] = ssidPassword;
+                payload["c"] = g_localCapabilityMask;
+                payload["b"] = g_lastSimBusy ? 1 : 0;
+                payload["r"] = g_sirenActiveFlag ? 1 : 0;
+                payload["h"] = g_localHeartbeatSeq;
+                payload["v"] = g_meshTimeVersion;
+                payload["a"] = ssidName;
+                payload["p"] = ssidPassword;
               },
               false,
               0,

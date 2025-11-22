@@ -26,6 +26,24 @@ bool enqueueSms(String number, String text, int priority);
 NodeCapabilities buildLocalCaps();
 void handleMeshEvent(const MeshEventInfo &info);
 
+String formatMacFull(uint64_t mac)
+{
+  uint8_t bytes[6];
+  for (int i = 0; i < 6; ++i)
+    bytes[5 - i] = (mac >> (8 * i)) & 0xFF;
+  char buf[18];
+  snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+           bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]);
+  return String(buf);
+}
+
+String formatMacShort(uint64_t mac)
+{
+  char buf[5];
+  snprintf(buf, sizeof(buf), "%04X", (uint16_t)(mac & 0xFFFF));
+  return String(buf);
+}
+
 struct MeshRemoteAlarm
 {
   bool pending = false;
@@ -51,13 +69,19 @@ void printTimestampReadable(uint64_t timestampMs)
 
 void handleMeshEvent(const MeshEventInfo &info)
 {
+  String macFull = formatMacFull(info.originMac);
+  String macShort = formatMacShort(info.originMac);
+  String originName = info.originNode.length() ? info.originNode : String("Node_") + macShort;
   g_remoteAlarm.pending = true;
-  g_remoteAlarm.description = info.originNode + ":" + info.type + ":" + info.payload;
+  g_remoteAlarm.description = originName + "[" + macShort + "]:" + info.type + ":" + info.payload;
   g_remoteAlarm.requiresSms = info.requiresSms;
   g_remoteAlarm.requiresSiren = info.requiresSiren;
   g_remoteAlarm.expireAtMs = millis() + 30000;
-  Serial.printf("[MESH] Remote event %s (sms=%d siren=%d)\n",
-                g_remoteAlarm.description.c_str(),
+  Serial.printf("[MESH] Remote event from %s (%s): %s:%s (sms=%d siren=%d)\n",
+                originName.c_str(),
+                macFull.c_str(),
+                info.type.c_str(),
+                info.payload.c_str(),
                 (int)g_remoteAlarm.requiresSms,
                 (int)g_remoteAlarm.requiresSiren);
 }
@@ -2516,34 +2540,22 @@ void PollSensorsAndDecide()
   bool tempAlarmNow = false;
   bool humAlarmNow  = false;
 #if HAS_GAS
-  static uint32_t _lastGasLog = 0;
   int gasRaw = analogRead(GasAnalogPin);
   public_GasValue = (public_GasValue * 7 + gasRaw) / 8;
   if (public_GasEnabled) {
     gasAlarmNow = (public_GasValue < public_GasMin) || (public_GasValue > public_GasMax);
-  }
-  if (millis() - _lastGasLog > 1000) {
-    _lastGasLog = millis();
-    Serial.printf("[GAS/TICK] pin=%d raw=%d filtered=%d range=[%d,%d] enabled=%d\n",
-                  GasAnalogPin, gasRaw, public_GasValue, public_GasMin, public_GasMax, (int)public_GasEnabled);
   }
 #endif
 
 #if HAS_DHT
   // Periodic DHT read + log (independent of Arm state)
   static uint32_t _lastDhtRead = 0;
-  static uint32_t _lastDhtLog  = 0;
   if (public_DhtEnabled && (millis() - _lastDhtRead > 2000)) {
     float t = dht.readTemperature();
     float h = dht.readHumidity();
     if (!isnan(t)) public_TempValue = t;
     if (!isnan(h)) public_HumValue  = h;
     _lastDhtRead = millis();
-  }
-  if (millis() - _lastDhtLog > 2000) {
-    _lastDhtLog = millis();
-    Serial.printf("[DHT/TICK] pin=%d t=%.1fC h=%.0f%% range=[%d,%d] enabled=%d\n",
-                  DHT_PIN, public_TempValue, public_HumValue, public_TempMin, public_TempMax, (int)public_DhtEnabled);
   }
   if (public_DhtEnabled) {
     tempAlarmNow = (public_TempValue < public_TempMin) || (public_TempValue > public_TempMax);
@@ -2575,9 +2587,6 @@ void PollSensorsAndDecide()
   if (!public_SystemStatus && !remoteAlarmActive)
     return;
 
-  static uint8_t prevV = 0, prevP = 0;
-  static bool prevLedActive = false, prevBuzzActive = false;
-
   //                           /                                      
   int vibState = public_VibEnabled ? digitalRead(sensors[0].pin) : LOW;
   int pirState = public_PirEnabled ? digitalRead(sensors[1].pin) : LOW;
@@ -2591,20 +2600,6 @@ void PollSensorsAndDecide()
   uint8_t P = windowCount(1);
 
   // gasAlarmNow computed at function start
-
-  int32_t cooldownLeft = (alarmCooldownUntilMs > now) ? (int32_t)(alarmCooldownUntilMs - now) : 0;
-
-  Serial.printf("[SENS] t=%lu ms | vibPin=%d pirPin=%d | V=%u P=%u | LED=%d BUZZ=%d | cooldownLeft=%ld ms\n",
-                (unsigned long)now, vibState, pirState, V, P,
-                (int)ledSM.active, (int)buzzSM.active, (long)cooldownLeft);
-
-  if (V != prevV || P != prevP)
-  {
-    Serial.printf("[WIN ] counts changed: V: %u -> %u , P: %u -> %u (window=%ums)\n",
-                  prevV, V, prevP, P, (unsigned)WINDOW_MS);
-    prevV = V;
-    prevP = P;
-  }
 
   bool localAlarmNow = shouldAlarm(V, P) || gasAlarmNow || tempAlarmNow || humAlarmNow;
   bool alarmNow = localAlarmNow || remoteAlarmActive;
@@ -2649,30 +2644,10 @@ void PollSensorsAndDecide()
     }
     localCauseDetail += String(" V=") + String(V) + " P=" + String(P);
   }
-  if (alarmNow)
-  {
-    bool c1 = (V >= 4) || (P >= 4);
-    bool bothHave = (V >= 1 && P >= 1);
-    bool bothLe4 = (V <= 4 && P <= 4);
-    bool c2 = ((V + P) >= 5) && bothHave && bothLe4;
-
-    Serial.printf("[ALRM] condition met: c1=%d, c2=%d gas=%d temp=%d hum=%d\n", (int)c1, (int)c2, (int)gasAlarmNow, (int)tempAlarmNow, (int)humAlarmNow);
-  }
-
-  if (prevBuzzActive != buzzSM.active)
-  {
-    Serial.printf("[BUZZ] state change: %s -> %s\n",
-                  prevBuzzActive ? "ACTIVE" : "INACTIVE",
-                  buzzSM.active ? "ACTIVE" : "INACTIVE");
-    prevBuzzActive = buzzSM.active;
-  }
-  if (prevLedActive != ledSM.active)
-  {
-    Serial.printf("[LED ] state change: %s -> %s\n",
-                  prevLedActive ? "ACTIVE" : "INACTIVE",
-                  ledSM.active ? "ACTIVE" : "INACTIVE");
-    prevLedActive = ledSM.active;
-  }
+  static bool prevLocalAlarm = false;
+  if (localAlarmNow && !prevLocalAlarm)
+    Serial.printf("[ALRM] Local trigger: %s\n", localCauseDetail.c_str());
+  prevLocalAlarm = localAlarmNow;
 
   // ---                       ---
 
@@ -2699,19 +2674,6 @@ void PollSensorsAndDecide()
         g_eventCount[1] = 0;
         Serial.println("[ALRM] window counts reset (V=0, P=0).");
       }
-    }
-    else if (!driveBuzzer)
-    {
-      Serial.println("[ALRM] Buzzer not requested for this event.");
-    }
-    else if (buzzSM.active)
-    {
-      Serial.println("[ALRM] condition true but buzzer already ACTIVE     no restart.");
-    }
-    else if ((int32_t)(now - alarmCooldownUntilMs) < 0)
-    {
-      Serial.printf("[ALRM] condition true but still in cooldown (%ld ms left)     no start.\n",
-                    (long)((int32_t)(alarmCooldownUntilMs - now)));
     }
 
     if (sendSmsNow)
@@ -2762,26 +2724,21 @@ void PollSensorsAndDecide()
     {
       if (!ledSM.active)
       {
-        Serial.println("[LED ] START soft-blink (on/off=500/500, no fixed duration; auto-stop on silence).");
         smStart(ledSM, 500, 500, 0);
       }
       ledExtendUntilMs = now + LED_EXTEND_MS;
-      Serial.printf("[LED ] extend-until set to t=%lu (in %u ms)\n",
-                    (unsigned long)ledExtendUntilMs, (unsigned)LED_EXTEND_MS);
     }
   }
 
   //        LED                                        
   if (!public_LedEnabled && ledSM.active)
   {
-    Serial.println("[LED ] policy disabled -> STOP.");
     smStop(ledSM);
   }
 
   //                     LED                        s (                                 )
   if (ledSM.active && (int32_t)(now - ledExtendUntilMs) > 0 && buzzSM.active == false)
   {
-    Serial.println("[LED ] STOP due to silence (no events in the last 2s).");
     smStop(ledSM);
   }
 }

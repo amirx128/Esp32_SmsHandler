@@ -22,6 +22,7 @@ struct MeshEventInfo
 {
   String messageId;
   String originNode;
+  uint64_t originMac = 0;
   String type;
   String payload;
   bool requiresSms = false;

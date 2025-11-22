@@ -439,12 +439,17 @@ void applyAck(uint32_t messageId, uint64_t eventOrigin, uint64_t ackNode)
 void handleHello(const MeshPacketHeader &header, const HelloPayload &payload)
 {
   NodeEntry &node = ensureNode(header.originMac);
+  bool wasOnline = node.online;
   node.nodeId = payload.nodeId[0] ? String(payload.nodeId) : shortMac(header.originMac);
   node.friendlyName = payload.friendly[0] ? String(payload.friendly) : node.nodeId;
   node.ssid = payload.ssid;
   node.caps = decodeCaps(payload.capsMask, payload.sensorCount);
   node.online = true;
   node.lastSeenMs = millis();
+  if (!wasOnline)
+  {
+    Serial.printf("[MESH] Node %s (%s) online.\n", node.friendlyName.c_str(), node.nodeId.c_str());
+  }
 }
 
 void handleEvent(const MeshPacketHeader &header, const EventPayload &payload)
@@ -474,6 +479,7 @@ void handleEvent(const MeshPacketHeader &header, const EventPayload &payload)
   MeshEventInfo info;
   info.messageId = String(history.originNode) + "-" + String(history.messageId, HEX);
   info.originNode = history.originNode;
+  info.originMac = header.originMac;
   info.type = history.type;
   info.payload = history.payload;
   info.requiresSms = history.requiresSms;
@@ -623,7 +629,11 @@ void MeshNet_Tick()
     if (!node.isLocal && node.online && node.lastSeenMs > 0)
     {
       if ((uint32_t)(now - node.lastSeenMs) > kNodeOfflineMs)
+      {
         node.online = false;
+        Serial.printf("[MESH] Node %s (%s) offline (timeout).\n",
+                      node.friendlyName.c_str(), node.nodeId.c_str());
+      }
     }
   }
 

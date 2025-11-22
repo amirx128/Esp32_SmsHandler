@@ -3009,6 +3009,12 @@ void setup()
 #endif
 
   SetPublicVariablesFromPrefs();
+  uint64_t mac = ESP.getEfuseMac();
+  Serial.printf("[MESH] Local node name=%s short=%s mac=%s SSID=%s\n",
+                deviceName.c_str(),
+                formatMacShort(mac).c_str(),
+                formatMacFull(mac).c_str(),
+                ssidName.c_str());
   StartSoftAP();
   MeshNet_Init(handleMeshEvent);
   MeshNet_UpdateLocalCapabilities(buildLocalCaps());

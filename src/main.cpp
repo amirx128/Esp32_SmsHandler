@@ -2934,6 +2934,10 @@ void SetPublicVariablesFromPrefs()
 
   String trimmedSsid = ssidName;
   trimmedSsid.trim();
+  if (trimmedSsid.equalsIgnoreCase(ssidNameDefault) || trimmedSsid.equalsIgnoreCase("ElixHome"))
+  {
+    trimmedSsid = "";
+  }
   if (trimmedSsid.length() < 4)
   {
     trimmedSsid = String("ElixIoT_") + formatMacCompact(mac);

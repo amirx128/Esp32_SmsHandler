@@ -25,6 +25,7 @@ void SetPublicVariablesFromPrefs();
 bool enqueueSms(String number, String text, int priority);
 NodeCapabilities buildLocalCaps();
 void handleMeshEvent(const MeshEventInfo &info);
+void EnsurePreferencesFresh();
 
 String formatMacFull(uint64_t mac)
 {
@@ -310,8 +311,8 @@ struct ConfigKey
 
 //                           :                                                    +                                    
 ConfigKey defaultKeys[] = {
-    {"wifi_Ssid_Name",   "                WiFi (SSID)",     "string", ssidNameDefault,      "2",  "10",  "",            false},
-    {"Ssid_Password",    "       WiFi",                  "string", ssidPasswordDefault,  "3",  "20",  "",            false},
+    {"wifi_Ssid_Name",   "نام شبکه مش (SSID)",     "string", ssidNameDefault,      "2",  "32",  "",            false},
+    {"Ssid_Password",    "رمز شبکه مش",                  "string", ssidPasswordDefault,  "8",  "32",  "",            false},
 
     {"deviceName",       "                   ",                "string", "            ",             "3",  "20",  "",            false},
 
@@ -413,6 +414,15 @@ const char index_html[] PROGMEM = R"rawliteral(
     <button class="btn-s" onclick="changePass()">Change Password</button>
     <button class="btn-s" onclick="toggleHelp()">Help</button>
     <button onclick="logout()">Logout</button> 
+  </div>
+  <div class="card">
+    <h2>Mesh Wi-Fi</h2>
+    <label for="meshSsid">Mesh SSID</label>
+    <input type="text" id="meshSsid" placeholder="Mesh SSID"/>
+    <label for="meshPass">Mesh Password</label>
+    <input type="password" id="meshPass" placeholder="Mesh password"/>
+    <button onclick="saveMeshWifi()">Save Mesh Wi-Fi</button>
+    <p class="error" id="meshMsg"></p>
   </div>
   <div id="grid" class="grid"></div>
 
@@ -596,6 +606,7 @@ async function loadKeys(){
   if (data.keys){
     window.keys = [];
     data.keys.forEach(k => window.keys.push(k));
+    populateMeshSettings(window.keys);
     render();
   }
 }
@@ -628,6 +639,28 @@ function render(){
     `;
     g.appendChild(div);
   });
+}
+
+function populateMeshSettings(keys){
+  const ssidKey = keys.find(k => k.key === 'wifi_Ssid_Name');
+  const passKey = keys.find(k => k.key === 'Ssid_Password');
+  const ssidInput = $('meshSsid');
+  const passInput = $('meshPass');
+  if (ssidInput && ssidKey) ssidInput.value = ssidKey.value || '';
+  if (passInput && passKey) passInput.value = passKey.value || '';
+}
+
+async function saveMeshWifi(){
+  const msgEl = $('meshMsg');
+  if (msgEl) msgEl.textContent = '';
+  const ssid = $('meshSsid') ? $('meshSsid').value.trim() : '';
+  const pass = $('meshPass') ? $('meshPass').value : '';
+  let res1 = await api('/save', {key: 'wifi_Ssid_Name', value: ssid});
+  let res2 = await api('/save', {key: 'Ssid_Password', value: pass});
+  if (msgEl){
+    if (res1.success && res2.success) msgEl.textContent = 'Saved mesh Wi-Fi settings.';
+    else msgEl.textContent = (res1.error || res2.error || 'Save error');
+  }
 }
 
 async function save(key){
@@ -1511,7 +1544,7 @@ void StartSoftAP()
   }
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAPsetHostname(deviceName.c_str());
-  bool ap_started = WiFi.softAP(ssidName.c_str(), ssidPassword.c_str(), MeshNet_GetMeshChannel(), false, 4);
+  bool ap_started = WiFi.softAP(ssidName.c_str(), ssidPassword.c_str(), MeshNet_GetMeshChannel(), true, 4);
   if (ap_started)
   {
     Serial.println("AP Started Successfully!");
@@ -2899,6 +2932,20 @@ NodeCapabilities buildLocalCaps()
   return caps;
 }
 
+void EnsurePreferencesFresh()
+{
+  String currentHash = ESP.getSketchMD5();
+  if (!currentHash.length())
+    currentHash = "nohash";
+  String storedHash = prefs.getString("fw_hash", "");
+  if (storedHash != currentHash)
+  {
+    Serial.println("[CFG] Firmware changed -> resetting preferences to defaults.");
+    prefs.clear();
+    prefs.putString("fw_hash", currentHash);
+  }
+}
+
 void SetPublicVariablesFromPrefs()
 {
   //                                                  
@@ -3010,6 +3057,7 @@ void setup()
 
   prefs.begin("config", false);
   prefsClock.begin("clock", false);
+  EnsurePreferencesFresh();
 
   //              
   pinMode(AllarmLedPin, OUTPUT);

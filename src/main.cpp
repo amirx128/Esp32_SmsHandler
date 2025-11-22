@@ -44,6 +44,13 @@ String formatMacShort(uint64_t mac)
   return String(buf);
 }
 
+String formatMacCompact(uint64_t mac)
+{
+  char buf[13];
+  snprintf(buf, sizeof(buf), "%012llX", (unsigned long long)mac);
+  return String(buf);
+}
+
 struct MeshRemoteAlarm
 {
   bool pending = false;
@@ -2913,17 +2920,18 @@ void SetPublicVariablesFromPrefs()
   userPassword = prefs.getString("password", "1234");
 
   // WiFi creds + identity
+  uint64_t mac = ESP.getEfuseMac();
   ssidName = prefs.getString("wifi_Ssid_Name", ssidNameDefault);
   ssidPassword = prefs.getString("Ssid_Password", ssidPasswordDefault);
   deviceName = prefs.getString("deviceName", "");
   if (deviceName.length() < 3)
   {
-    deviceName = String("Node_") + MeshNet_GetShortMac();
+    deviceName = String("Node_") + formatMacCompact(mac);
     prefs.putString("deviceName", deviceName);
   }
   if (ssidName.length() < 4)
   {
-    ssidName = String("ElixIoT_") + MeshNet_GetShortMac();
+    ssidName = String("ElixIoT_") + formatMacCompact(mac);
     prefs.putString("wifi_Ssid_Name", ssidName);
   }
   if (ssidPassword.length() < 8)

@@ -78,13 +78,16 @@ void handleMeshEvent(const MeshEventInfo &info)
   String macFull = formatMacFull(info.originMac);
   String macShort = formatMacShort(info.originMac);
   String originName = info.originNode.length() ? info.originNode : String("Node_") + macShort;
+  bool isLocal = (info.originMac == ESP.getEfuseMac());
+  String tag = isLocal ? " (me)" : "";
+  String labeledName = originName + tag;
   g_remoteAlarm.pending = true;
-  g_remoteAlarm.description = originName + "[" + macShort + "]:" + info.type + ":" + info.payload;
+  g_remoteAlarm.description = labeledName + "[" + macShort + "]:" + info.type + ":" + info.payload;
   g_remoteAlarm.requiresSms = info.requiresSms;
   g_remoteAlarm.requiresSiren = info.requiresSiren;
   g_remoteAlarm.expireAtMs = millis() + 30000;
   Serial.printf("[MESH] Remote event from %s (%s): %s:%s (sms=%d siren=%d)\n",
-                originName.c_str(),
+                labeledName.c_str(),
                 macFull.c_str(),
                 info.type.c_str(),
                 info.payload.c_str(),
@@ -386,6 +389,10 @@ const char index_html[] PROGMEM = R"rawliteral(
     .q { background:#555; }
     .s { background:#2c7; }
     .f { background:#c44; }
+    .modal { position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.7); display:flex; align-items:center; justify-content:center; z-index:1000; }
+    .modal.hidden { display:none; }
+    .modal-content { background:#2d2d2d; padding:20px; border-radius:12px; width:90%; max-width:900px; max-height:90%; overflow:auto; box-shadow:0 10px 25px rgba(0,0,0,0.5); }
+    .modal-close { float:right; font-size:1.5rem; cursor:pointer; }
     /* Hide any stray inbox block outside #main */
     body > .container:not(#main) #inbox { display: none; }
   </style>
@@ -425,6 +432,26 @@ const char index_html[] PROGMEM = R"rawliteral(
     <p class="error" id="meshMsg"></p>
   </div>
   <div id="grid" class="grid"></div>
+  <div class="card">
+    <h3>Mesh Nodes</h3>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Node ID</th>
+            <th>MAC</th>
+            <th>SSID</th>
+            <th>Status</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="mesh-nodes-body">
+          <tr><td colspan="6" style="text-align:center;color:#999;">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
 
 )rawliteral"
 #if HAS_GAS
@@ -513,8 +540,32 @@ R"rawliteral(
   </div>
 </div>
 
+<div id="meshModal" class="modal hidden">
+  <div class="modal-content">
+    <span class="modal-close" onclick="closeMeshModal()">&times;</span>
+    <h3 id="meshModalTitle">Node Messages</h3>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Message ID</th>
+            <th>Type</th>
+            <th>Payload</th>
+            <th>Sent At</th>
+            <th>Acks</th>
+          </tr>
+        </thead>
+        <tbody id="meshModalBody">
+          <tr><td colspan="5" style="text-align:center;color:#999;">No messages</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
 <script>
 let TOKEN = null;
+let meshState = {nodes:[], events:[]};
 
 function $(id){ return document.getElementById(id); }
 
@@ -555,6 +606,7 @@ async function login(){
     await loadKeys();
     await loadSmsLog();
     await loadInboxLog();
+    await loadMeshState();
   )rawliteral"
 #if HAS_GAS
 R"rawliteral(
@@ -564,6 +616,7 @@ R"rawliteral(
 R"rawliteral(
     setInterval(loadSmsLog, 3000);
     setInterval(loadInboxLog, 5000);
+    setInterval(loadMeshState, 5000);
   )rawliteral"
 #if HAS_GAS
 R"rawliteral(
@@ -756,6 +809,74 @@ async function loadInboxLog(){
     `;
     tb.appendChild(tr);
   });
+}
+
+async function loadMeshState(){
+  const data = await api('/mesh/state');
+  if (data && data.nodes && data.events){
+    meshState = data;
+    renderMeshNodes();
+  }
+}
+
+function renderMeshNodes(){
+  const tb = $('mesh-nodes-body');
+  if (!tb) return;
+  tb.innerHTML = '';
+  if (!meshState.nodes || !meshState.nodes.length){
+    tb.innerHTML = `<tr><td colspan="6" style="text-align:center;color:#999;">No nodes detected</td></tr>`;
+    return;
+  }
+  meshState.nodes.forEach(node => {
+    const tr = document.createElement('tr');
+    const friendly = node.friendly || node.id;
+    const status = node.online ? 'online' : 'offline';
+    tr.innerHTML = `
+      <td>${friendly}</td>
+      <td class="mono">${node.id}</td>
+      <td class="mono">${node.mac || '-'}</td>
+      <td class="mono">${node.ssid || '-'}</td>
+      <td><span class="badge ${node.online ? 's' : 'f'}">${status}</span></td>
+      <td><button onclick="openMeshModal('${node.id}')">View Messages</button></td>
+    `;
+    tb.appendChild(tr);
+  });
+}
+
+function openMeshModal(nodeId){
+  const modal = $('meshModal');
+  const body = $('meshModalBody');
+  const title = $('meshModalTitle');
+  if (!modal || !body) return;
+  const node = meshState.nodes ? meshState.nodes.find(n => n.id === nodeId) : null;
+  if (title) title.textContent = node ? `Messages from ${node.friendly || node.id}` : `Messages (${nodeId})`;
+  body.innerHTML = '';
+  const allEvents = meshState.events || [];
+  const filtered = allEvents.filter(evt => (evt.originId && evt.originId === nodeId) || (!evt.originId && node && evt.origin === (node.friendly || node.id)));
+  filtered.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  const latest = filtered.slice(0, 200);
+  if (!latest.length){
+    body.innerHTML = `<tr><td colspan="5" style="text-align:center;color:#999;">No messages</td></tr>`;
+  } else {
+    latest.forEach(evt => {
+      const tr = document.createElement('tr');
+      const ackText = (evt.acks && evt.acks.length) ? evt.acks.join(', ') : '—';
+      tr.innerHTML = `
+        <td class="mono">${evt.id || ''}</td>
+        <td>${evt.type || ''}</td>
+        <td style="white-space:nowrap; max-width:260px; overflow:hidden; text-overflow:ellipsis;" title="${evt.payload || ''}">${evt.payload || ''}</td>
+        <td class="mono">${fmtTs(evt.ts)}</td>
+        <td>${ackText}</td>
+      `;
+      body.appendChild(tr);
+    });
+  }
+  modal.classList.remove('hidden');
+}
+
+function closeMeshModal(){
+  const modal = $('meshModal');
+  if (modal) modal.classList.add('hidden');
 }
 
 function sendTestSms(){
@@ -1544,7 +1665,7 @@ void StartSoftAP()
   }
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAPsetHostname(deviceName.c_str());
-  bool ap_started = WiFi.softAP(ssidName.c_str(), ssidPassword.c_str(), MeshNet_GetMeshChannel(), true, 4);
+  bool ap_started = WiFi.softAP(ssidName.c_str(), ssidPassword.c_str(), MeshNet_GetMeshChannel(), false, 4);
   if (ap_started)
   {
     Serial.println("AP Started Successfully!");
@@ -2460,6 +2581,7 @@ const int sensorCount = sizeof(sensors) / sizeof(sensors[0]);
 //                                                                                            
 const uint32_t WINDOW_MS = 2000;
 const uint8_t MAX_EVENTS_PER_SENSOR = 16;
+const uint8_t ALARM_THRESHOLD = 7;
 uint32_t g_eventTimes[2][MAX_EVENTS_PER_SENSOR]; // [sensorIndex][slot]
 uint8_t g_eventCount[2] = {0, 0};
 const uint32_t DEBOUNCE_MS = 80; //                  
@@ -2534,6 +2656,8 @@ void recordEvent(uint8_t idx)
       g_eventTimes[idx][i - 1] = g_eventTimes[idx][i];
     g_eventTimes[idx][MAX_EVENTS_PER_SENSOR - 1] = now;
   }
+  Serial.printf("[SENS] %s pulse recorded (count=%u)\n",
+                sensors[idx].name.c_str(), g_eventCount[idx]);
 }
 
 //                                                 
@@ -2558,11 +2682,7 @@ uint8_t windowCount(uint8_t idx)
 //         :            >=5                                                                      4               
 bool shouldAlarm(uint8_t vCount, uint8_t pCount)
 {
-  bool c1 = (vCount >= 4) || (pCount >= 4);
-  bool bothHave = (vCount >= 1 && pCount >= 1);
-  bool bothLe4 = (vCount <= 4 && pCount <= 4);
-  bool c2 = ((vCount + pCount) >= 5) && bothHave && bothLe4;
-  return c1 || c2;
+  return (vCount + pCount) >= ALARM_THRESHOLD;
 }
 
 //                                            LED                                                               .
@@ -2684,7 +2804,8 @@ void PollSensorsAndDecide()
   }
   static bool prevLocalAlarm = false;
   if (localAlarmNow && !prevLocalAlarm)
-    Serial.printf("[ALRM] Local trigger: %s\n", localCauseDetail.c_str());
+    Serial.printf("[ALRM] Local trigger: %s (window=%u ms, total=%u)\n",
+                  localCauseDetail.c_str(), (unsigned)WINDOW_MS, (unsigned)(V + P));
   prevLocalAlarm = localAlarmNow;
 
   // ---                       ---
@@ -3077,7 +3198,7 @@ void setup()
 
   SetPublicVariablesFromPrefs();
   uint64_t mac = ESP.getEfuseMac();
-  Serial.printf("[MESH] Local node name=%s short=%s mac=%s SSID=%s\n",
+  Serial.printf("[MESH] Local node name=%s (me) short=%s mac=%s SSID=%s\n",
                 deviceName.c_str(),
                 formatMacShort(mac).c_str(),
                 formatMacFull(mac).c_str(),

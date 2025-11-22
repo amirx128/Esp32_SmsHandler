@@ -16,7 +16,7 @@ constexpr uint32_t kHelloIntervalMs    = 4000;
 constexpr uint32_t kNodeOfflineMs      = 100000;
 constexpr uint32_t kEventResendMs      = 2000;
 constexpr uint32_t kEventLifetimeMs    = 60000;
-constexpr size_t   kMaxHistory         = 32;
+constexpr size_t   kMaxHistory         = 1024;
 constexpr uint8_t  kAckTtl             = 5;
 constexpr uint8_t  kFlagsRequiresSms   = 0x01;
 constexpr uint8_t  kFlagsRequiresSiren = 0x02;
@@ -94,6 +94,7 @@ struct HistoryEntry
   uint32_t             messageId = 0;
   uint64_t             originMac = 0;
   String               originNode;
+  String               originShortId;
   String               type;
   String               payload;
   bool                 requiresSms = false;
@@ -145,6 +146,17 @@ String shortMac(uint64_t mac)
 {
   char buf[5];
   snprintf(buf, sizeof(buf), "%04X", static_cast<uint16_t>(mac & 0xFFFF));
+  return String(buf);
+}
+
+String formatMacString(uint64_t mac)
+{
+  char buf[18];
+  uint8_t bytes[6];
+  for (int i = 0; i < 6; ++i)
+    bytes[5 - i] = (mac >> (8 * i)) & 0xFF;
+  snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+           bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]);
   return String(buf);
 }
 
@@ -466,6 +478,7 @@ void handleEvent(const MeshPacketHeader &header, const EventPayload &payload)
   history.messageId = header.messageId;
   history.originMac = header.originMac;
   history.originNode = node.friendlyName.length() ? node.friendlyName : node.nodeId;
+  history.originShortId = node.nodeId;
   history.type = payload.type;
   history.payload = payload.payload;
   history.requiresSms = (payload.flags & kFlagsRequiresSms) != 0;
@@ -709,6 +722,7 @@ String MeshNet_RecordNetworkEvent(const String &type,
   history.messageId = evt.messageId;
   history.originMac = g_localMac;
   history.originNode = g_friendlyName.length() ? g_friendlyName : g_localNodeId;
+  history.originShortId = g_localNodeId;
   history.type = type;
   history.payload = payload;
   history.requiresSms = requiresSms;
@@ -737,6 +751,7 @@ void MeshNet_SerializeNodes(JsonArray arr)
     JsonObject obj = arr.createNestedObject();
     obj["id"] = node.nodeId;
     obj["friendly"] = node.friendlyName;
+    obj["mac"] = formatMacString(node.mac);
     obj["ssid"] = node.ssid;
     obj["local"] = node.isLocal;
     obj["online"] = node.online;
@@ -763,6 +778,8 @@ void MeshNet_SerializeEvents(JsonArray arr)
     JsonObject obj = arr.createNestedObject();
     obj["id"] = entry.originNode + "-" + String(entry.messageId, HEX);
     obj["origin"] = entry.originNode;
+    obj["originId"] = entry.originShortId;
+    obj["originMac"] = formatMacString(entry.originMac);
     obj["type"] = entry.type;
     obj["payload"] = entry.payload;
     obj["ts"] = (uint64_t)entry.timestampMs;

@@ -67,11 +67,9 @@ const uint32_t kNetworkAlarmMinIntervalMs = 5000;
 // ---- Time formatting (UNCHANGED: +12600 and localtime) ----
 void printTimestampReadable(uint64_t timestampMs)
 {
-  time_t timestampSec = (timestampMs / 1000) + 12600; // UTC+3:30         
+  time_t timestampSec = (timestampMs / 1000) + 12600; // UTC+3:30
   struct tm *timeinfo = localtime(&timestampSec);
   strftime(lastOktime, sizeof(lastOktime), "%Y-%m-%d %H:%M:%S", timeinfo);
-  Serial.print(" ok time is : ");
-  Serial.println(lastOktime);
 }
 
 void handleMeshEvent(const MeshEventInfo &info)
@@ -2924,16 +2922,25 @@ void SetPublicVariablesFromPrefs()
   ssidName = prefs.getString("wifi_Ssid_Name", ssidNameDefault);
   ssidPassword = prefs.getString("Ssid_Password", ssidPasswordDefault);
   deviceName = prefs.getString("deviceName", "");
-  if (deviceName.length() < 3)
+
+  String trimmedDevice = deviceName;
+  trimmedDevice.trim();
+  if (trimmedDevice.length() < 3)
   {
-    deviceName = String("Node_") + formatMacCompact(mac);
-    prefs.putString("deviceName", deviceName);
+    trimmedDevice = String("Node_") + formatMacCompact(mac);
+    prefs.putString("deviceName", trimmedDevice);
   }
-  if (ssidName.length() < 4)
+  deviceName = trimmedDevice;
+
+  String trimmedSsid = ssidName;
+  trimmedSsid.trim();
+  if (trimmedSsid.length() < 4)
   {
-    ssidName = String("ElixIoT_") + formatMacCompact(mac);
-    prefs.putString("wifi_Ssid_Name", ssidName);
+    trimmedSsid = String("ElixIoT_") + formatMacCompact(mac);
+    prefs.putString("wifi_Ssid_Name", trimmedSsid);
   }
+  ssidName = trimmedSsid;
+
   if (ssidPassword.length() < 8)
   {
     ssidPassword = ssidPasswordDefault;

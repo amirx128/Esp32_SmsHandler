@@ -250,7 +250,10 @@ void markEventSeen(uint32_t id, uint64_t origin)
     return;
   if (g_seenEvents.size() >= 64)
     g_seenEvents.erase(g_seenEvents.begin());
-  g_seenEvents.push_back({id, origin});
+  SeenEvent entry;
+  entry.id = id;
+  entry.origin = origin;
+  g_seenEvents.push_back(entry);
 }
 
 bool ackSeen(uint32_t id, uint64_t origin, uint64_t ackNode)
@@ -267,7 +270,11 @@ void markAckSeen(uint32_t id, uint64_t origin, uint64_t ackNode)
     return;
   if (g_seenAcks.size() >= 64)
     g_seenAcks.erase(g_seenAcks.begin());
-  g_seenAcks.push_back({id, origin, ackNode});
+  SeenAck ack;
+  ack.id = id;
+  ack.eventOrigin = origin;
+  ack.ackNode = ackNode;
+  g_seenAcks.push_back(ack);
 }
 
 HistoryEntry *findHistory(uint64_t origin, uint32_t messageId)
@@ -300,7 +307,7 @@ void ensureBroadcastPeer()
   memcpy(peer.peer_addr, kBroadcastAddr, 6);
   peer.channel = kMeshChannel;
   peer.encrypt = false;
-  peer.ifidx = ESP_IF_WIFI_STA;
+  peer.ifidx = WIFI_IF_STA;
   esp_now_add_peer(&peer);
 }
 

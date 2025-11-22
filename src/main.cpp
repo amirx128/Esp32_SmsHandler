@@ -26,6 +26,19 @@ bool enqueueSms(String number, String text, int priority);
 NodeCapabilities buildLocalCaps();
 void handleMeshEvent(const MeshEventInfo &info);
 
+struct MeshRemoteAlarm
+{
+  bool pending = false;
+  String description;
+  bool requiresSms = false;
+  bool requiresSiren = false;
+  uint32_t expireAtMs = 0;
+};
+
+MeshRemoteAlarm g_remoteAlarm;
+uint32_t g_lastNetworkAlarmMs = 0;
+const uint32_t kNetworkAlarmMinIntervalMs = 5000;
+
 // ---- Time formatting (UNCHANGED: +12600 and localtime) ----
 void printTimestampReadable(uint64_t timestampMs)
 {
@@ -251,19 +264,6 @@ String ssidPassword;
 String username = "admin";
 String userPassword = "1234";
 String deviceName;
-
-struct MeshRemoteAlarm
-{
-  bool pending = false;
-  String description;
-  bool requiresSms = false;
-  bool requiresSiren = false;
-  uint32_t expireAtMs = 0;
-};
-
-MeshRemoteAlarm g_remoteAlarm;
-uint32_t g_lastNetworkAlarmMs = 0;
-const uint32_t kNetworkAlarmMinIntervalMs = 5000;
 
 // ===================== Config Keys =====================
 

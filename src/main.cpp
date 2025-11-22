@@ -7,6 +7,7 @@
 #include <time.h>
 #include <vector>
 #include "DeviceConfig.h"
+#include "MeshlessNetwork.h"
 #if HAS_DHT
 #include <DHT.h>
 #endif
@@ -22,6 +23,8 @@ char lastOktime[32];
 
 void SetPublicVariablesFromPrefs();
 bool enqueueSms(String number, String text, int priority);
+NodeCapabilities buildLocalCaps();
+void handleMeshEvent(const MeshEventInfo &info);
 
 // ---- Time formatting (UNCHANGED: +12600 and localtime) ----
 void printTimestampReadable(uint64_t timestampMs)
@@ -31,6 +34,19 @@ void printTimestampReadable(uint64_t timestampMs)
   strftime(lastOktime, sizeof(lastOktime), "%Y-%m-%d %H:%M:%S", timeinfo);
   Serial.print(" ok time is : ");
   Serial.println(lastOktime);
+}
+
+void handleMeshEvent(const MeshEventInfo &info)
+{
+  g_remoteAlarm.pending = true;
+  g_remoteAlarm.description = info.originNode + ":" + info.type + ":" + info.payload;
+  g_remoteAlarm.requiresSms = info.requiresSms;
+  g_remoteAlarm.requiresSiren = info.requiresSiren;
+  g_remoteAlarm.expireAtMs = millis() + 30000;
+  Serial.printf("[MESH] Remote event %s (sms=%d siren=%d)\n",
+                g_remoteAlarm.description.c_str(),
+                (int)g_remoteAlarm.requiresSms,
+                (int)g_remoteAlarm.requiresSiren);
 }
 
 // ---- Session token for web auth ----
@@ -234,6 +250,20 @@ String ssidName;
 String ssidPassword;
 String username = "admin";
 String userPassword = "1234";
+String deviceName;
+
+struct MeshRemoteAlarm
+{
+  bool pending = false;
+  String description;
+  bool requiresSms = false;
+  bool requiresSiren = false;
+  uint32_t expireAtMs = 0;
+};
+
+MeshRemoteAlarm g_remoteAlarm;
+uint32_t g_lastNetworkAlarmMs = 0;
+const uint32_t kNetworkAlarmMinIntervalMs = 5000;
 
 // ===================== Config Keys =====================
 
@@ -1300,6 +1330,17 @@ void HtmlFunctions()
     String out; serializeJson(doc, out);
     req->send(200, "application/json", out); });
 
+  server.on("/api/mesh/state", HTTP_GET, [](AsyncWebServerRequest *req)
+            {
+    if (!authenticateWeb(req)) { req->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
+    DynamicJsonDocument doc(16384);
+    JsonArray nodes = doc.createNestedArray("nodes");
+    MeshNet_SerializeNodes(nodes);
+    JsonArray events = doc.createNestedArray("events");
+    MeshNet_SerializeEvents(events);
+    String out; serializeJson(doc, out);
+    req->send(200, "application/json", out); });
+
   server.addHandler(new AsyncCallbackJsonWebHandler("/api/login", [](AsyncWebServerRequest *request, JsonVariant &json)
                                                     {
     if (!json.is<JsonObject>()) { request->send(400,"application/json","{\"error\":\"         JSON                      \"}"); return; }
@@ -1391,6 +1432,7 @@ void TaskDelay(int ms, bool serviceTick, bool serviceSms)
       PollSensorsAndDecide();
       // Legacy tick
       SetAllarmState();
+      MeshNet_Tick();
     }
 
     if (serviceSms)
@@ -1426,7 +1468,8 @@ void SplitMobiles();
 void stopAP()
 {
   WiFi.softAPdisconnect(true);
-  WiFi.mode(WIFI_OFF);
+  WiFi.mode(WIFI_STA);
+  MeshNet_SetLocalSsid("");
   Serial.println("[WIFI] SoftAP stopped.");
 }
 
@@ -1437,17 +1480,20 @@ void StartSoftAP()
     stopAP();
     return;
   }
-  WiFi.mode(WIFI_AP);
-  bool ap_started = WiFi.softAP(ssidName, ssidPassword);
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAPsetHostname(deviceName.c_str());
+  bool ap_started = WiFi.softAP(ssidName.c_str(), ssidPassword.c_str(), MeshNet_GetMeshChannel(), false, 4);
   if (ap_started)
   {
     Serial.println("AP Started Successfully!");
     Serial.print("IP Address: http://");
     Serial.println(WiFi.softAPIP());
+    MeshNet_SetLocalSsid(ssidName);
   }
   else
   {
     Serial.println("AP Failed to Start!");
+    MeshNet_SetLocalSsid("");
   }
 }
 
@@ -2505,10 +2551,29 @@ void PollSensorsAndDecide()
   }
 #endif
 
-  if (!public_SystemStatus)
-    return;
-
   uint32_t now = millis();
+
+  bool remoteAlarmActive = false;
+  String remoteCause;
+  bool remoteRequiresSms = false;
+  bool remoteRequiresSiren = false;
+  if (g_remoteAlarm.pending)
+  {
+    if ((int32_t)(now - g_remoteAlarm.expireAtMs) < 0)
+    {
+      remoteAlarmActive = true;
+      remoteCause = g_remoteAlarm.description;
+      remoteRequiresSms = g_remoteAlarm.requiresSms;
+      remoteRequiresSiren = g_remoteAlarm.requiresSiren;
+    }
+    else
+    {
+      g_remoteAlarm.pending = false;
+    }
+  }
+
+  if (!public_SystemStatus && !remoteAlarmActive)
+    return;
 
   static uint8_t prevV = 0, prevP = 0;
   static bool prevLedActive = false, prevBuzzActive = false;
@@ -2541,7 +2606,49 @@ void PollSensorsAndDecide()
     prevP = P;
   }
 
-  bool alarmNow = shouldAlarm(V, P) || gasAlarmNow || tempAlarmNow || humAlarmNow;
+  bool localAlarmNow = shouldAlarm(V, P) || gasAlarmNow || tempAlarmNow || humAlarmNow;
+  bool alarmNow = localAlarmNow || remoteAlarmActive;
+  String localCauseDetail;
+  String localCauseKey = "SENS";
+#if HAS_GAS
+  if (gasAlarmNow)
+  {
+    localCauseKey = "GAS";
+    localCauseDetail = String("GAS ") + String(public_GasValue) + " in[" + String(public_GasMin) + "," + String(public_GasMax) + "]";
+  }
+  else
+#endif
+#if HAS_DHT
+  if (tempAlarmNow)
+  {
+    localCauseKey = "TEMP";
+    localCauseDetail = String("TEMP ") + String(public_TempValue, 1) + "C in[" + String(public_TempMin) + "," + String(public_TempMax) + "]";
+  }
+  else if (humAlarmNow)
+  {
+    localCauseKey = "HUM";
+    localCauseDetail = String("HUM ") + String((int)public_HumValue) + "% in[" + String(public_HumMin) + "," + String(public_HumMax) + "]";
+  }
+  else
+#endif
+  {
+    if ((V >= 4 && P < 4))
+    {
+      localCauseKey = "PIR";
+      localCauseDetail = "PIR";
+    }
+    else if ((P >= 4 && V < 4))
+    {
+      localCauseKey = "VIB";
+      localCauseDetail = "VIB";
+    }
+    else
+    {
+      localCauseKey = "BOTH";
+      localCauseDetail = "BOTH";
+    }
+    localCauseDetail += String(" V=") + String(V) + " P=" + String(P);
+  }
   if (alarmNow)
   {
     bool c1 = (V >= 4) || (P >= 4);
@@ -2569,10 +2676,14 @@ void PollSensorsAndDecide()
 
   // ---                       ---
 
-  //                                                                                                                                                               
-  if (alarmNow && !buzzSM.active && (int32_t)(now - alarmCooldownUntilMs) >= 0)
+  if (alarmNow)
   {
-    if (public_AlertEnabled_Buzzer)
+    bool driveBuzzer = (localAlarmNow && public_AlertEnabled_Buzzer) ||
+                       (remoteAlarmActive && remoteRequiresSiren && public_AlertEnabled_Buzzer);
+    bool sendSmsNow = (localAlarmNow && public_AlertEnabled_Sms) ||
+                      (remoteAlarmActive && remoteRequiresSms && public_AlertEnabled_Sms);
+
+    if (driveBuzzer && !buzzSM.active && (int32_t)(now - alarmCooldownUntilMs) >= 0)
     {
       Serial.printf("[ALRM] START buzzer (on/off=500/500ms, duration=%ums). Reset LED & window. Set cooldown.\n",
                     (unsigned)BUZZER_ALARM_MS);
@@ -2582,42 +2693,47 @@ void PollSensorsAndDecide()
 
       alarmCooldownUntilMs = now + BUZZER_ALARM_MS + 1000;
 
-      g_eventCount[0] = 0;
-      g_eventCount[1] = 0;
-      Serial.println("[ALRM] window counts reset (V=0, P=0).");
+      if (localAlarmNow)
+      {
+        g_eventCount[0] = 0;
+        g_eventCount[1] = 0;
+        Serial.println("[ALRM] window counts reset (V=0, P=0).");
+      }
     }
-    else
+    else if (!driveBuzzer)
     {
-      Serial.println("[ALRM] Buzzer disabled -> no buzzer start.");
+      Serial.println("[ALRM] Buzzer not requested for this event.");
+    }
+    else if (buzzSM.active)
+    {
+      Serial.println("[ALRM] condition true but buzzer already ACTIVE     no restart.");
+    }
+    else if ((int32_t)(now - alarmCooldownUntilMs) < 0)
+    {
+      Serial.printf("[ALRM] condition true but still in cooldown (%ld ms left)     no start.\n",
+                    (long)((int32_t)(alarmCooldownUntilMs - now)));
     }
 
-    //            SMS                                           
-    if (public_AlertEnabled_Sms)
+    if (sendSmsNow)
     {
+      String throttleKey = remoteAlarmActive ? "REMOTE" : localCauseKey;
       for (auto &num : public_List_AllAlternetMobiles)
       {
-        if (shouldSendThrottled(num, gasAlarmNow?"GAS":(tempAlarmNow?"TEMP":(humAlarmNow?"HUM":"ALARM")), 30000))
+        if (shouldSendThrottled(num, throttleKey, 30000))
         {
-          String cause;
-          #if HAS_GAS
-          if (gasAlarmNow)
-            cause = String("GAS ") + String(public_GasValue) + " in[" + String(public_GasMin) + "," + String(public_GasMax) + "]";
+          String msg;
+          if (localAlarmNow)
+          {
+            msg = (gasAlarmNow || tempAlarmNow || humAlarmNow)
+                      ? (String("ALARM:") + localCauseDetail + " @ " + nowTimeReadable())
+                      : (String("ALARM:") + localCauseDetail + " @ " + nowTimeReadable());
+          }
           else
-          #endif
-          #if HAS_DHT
-          if (tempAlarmNow)
-            cause = String("TEMP ") + String(public_TempValue, 1) + "C in[" + String(public_TempMin) + "," + String(public_TempMax) + "]";
-          else if (humAlarmNow)
-            cause = String("HUM ") + String((int)public_HumValue) + "% in[" + String(public_HumMin) + "," + String(public_HumMax) + "]";
-          else
-          #endif
-            cause = (V >= 4 && P < 4)   ? "PIR"
-                   : (P >= 4 && V < 4) ? "VIB"
-                                       : "BOTH";
-          // Include device time in message
-          String msg = (gasAlarmNow || tempAlarmNow || humAlarmNow)
-                        ? (String("ALARM:") + cause + " @ " + nowTimeReadable())
-                        : (String("ALARM:") + cause + " V=" + String(V) + " P=" + String(P) + " @ " + nowTimeReadable());
+          {
+            msg = String("NET:") + remoteCause + " @ " + nowTimeReadable();
+          }
+          if (remoteAlarmActive && localAlarmNow)
+            msg = String("ALARM:") + localCauseDetail + " + NET:" + remoteCause + " @ " + nowTimeReadable();
 
           Serial.printf("[SMS ] enqueue to %s: %s\n", num.c_str(), msg.c_str());
           enqueueSms(num, msg, 0);
@@ -2628,8 +2744,18 @@ void PollSensorsAndDecide()
         }
       }
     }
+
+    if (localAlarmNow && (uint32_t)(now - g_lastNetworkAlarmMs) > kNetworkAlarmMinIntervalMs)
+    {
+      uint64_t ts = g_deviceNowMs ? g_deviceNowMs : (uint64_t)now;
+      MeshNet_RecordNetworkEvent("ALARM", localCauseDetail, public_AlertEnabled_Sms, public_AlertEnabled_Buzzer, 8, ts);
+      g_lastNetworkAlarmMs = now;
+    }
+
+    if (remoteAlarmActive)
+      g_remoteAlarm.pending = false;
   }
-  else if (!alarmNow)
+  else
   {
     //                                    LED                                                        LED                    
     if ((vibState == HIGH || pirState == HIGH || V > 0 || P > 0) && !buzzSM.active && public_LedEnabled)
@@ -2642,18 +2768,6 @@ void PollSensorsAndDecide()
       ledExtendUntilMs = now + LED_EXTEND_MS;
       Serial.printf("[LED ] extend-until set to t=%lu (in %u ms)\n",
                     (unsigned long)ledExtendUntilMs, (unsigned)LED_EXTEND_MS);
-    }
-  }
-  else
-  {
-    if (buzzSM.active)
-    {
-      Serial.println("[ALRM] condition true but buzzer already ACTIVE     no restart.");
-    }
-    else if ((int32_t)(now - alarmCooldownUntilMs) < 0)
-    {
-      Serial.printf("[ALRM] condition true but still in cooldown (%ld ms left)     no start.\n",
-                    (long)((int32_t)(alarmCooldownUntilMs - now)));
     }
   }
 
@@ -2795,6 +2909,34 @@ void SmsSender()
 
 // ===================== Setup / Loop =====================
 
+NodeCapabilities buildLocalCaps()
+{
+  NodeCapabilities caps;
+  caps.hasSim = true;
+  caps.smsAlertEnabled = public_AlertEnabled_Sms;
+  caps.smsTxEnabled = public_SmsTxEnabled;
+  caps.hasBuzzer = public_AlertEnabled_Buzzer;
+  caps.hasLed = public_LedEnabled;
+  caps.hasPir = public_PirEnabled;
+  caps.hasVib = public_VibEnabled;
+  caps.hasGas = public_GasEnabled;
+#if HAS_DHT
+  caps.hasDht = public_DhtEnabled;
+#else
+  caps.hasDht = false;
+#endif
+  caps.wifiEnabled = public_WifiEnabled;
+  uint8_t sensors = 0;
+  if (public_PirEnabled) sensors++;
+  if (public_VibEnabled) sensors++;
+  if (public_GasEnabled) sensors++;
+#if HAS_DHT
+  if (public_DhtEnabled) sensors++;
+#endif
+  caps.sensorCount = sensors;
+  return caps;
+}
+
 void SetPublicVariablesFromPrefs()
 {
   //                                                  
@@ -2813,9 +2955,26 @@ void SetPublicVariablesFromPrefs()
   username = prefs.getString("username", "admin");
   userPassword = prefs.getString("password", "1234");
 
-  // WiFi creds
+  // WiFi creds + identity
   ssidName = prefs.getString("wifi_Ssid_Name", ssidNameDefault);
   ssidPassword = prefs.getString("Ssid_Password", ssidPasswordDefault);
+  deviceName = prefs.getString("deviceName", "");
+  if (deviceName.length() < 3)
+  {
+    deviceName = String("Node_") + MeshNet_GetShortMac();
+    prefs.putString("deviceName", deviceName);
+  }
+  if (ssidName.length() < 4)
+  {
+    ssidName = String("ElixIoT_") + MeshNet_GetShortMac();
+    prefs.putString("wifi_Ssid_Name", ssidName);
+  }
+  if (ssidPassword.length() < 8)
+  {
+    ssidPassword = ssidPasswordDefault;
+    prefs.putString("Ssid_Password", ssidPassword);
+  }
+  MeshNet_SetFriendlyName(deviceName);
 
 
   public_SystemStatus = prefs.getString("SystemEnabled", "true") == "true";
@@ -2864,6 +3023,7 @@ void SetPublicVariablesFromPrefs()
   SplitMobiles();
 
   applyActuatorsPolicy();
+  MeshNet_UpdateLocalCapabilities(buildLocalCaps());
 }
 
 // removed stray JS block that broke C++ compilation
@@ -2893,6 +3053,8 @@ void setup()
 
   SetPublicVariablesFromPrefs();
   StartSoftAP();
+  MeshNet_Init(handleMeshEvent);
+  MeshNet_UpdateLocalCapabilities(buildLocalCaps());
   HtmlFunctions();
   SetupSim();
 
@@ -2910,6 +3072,13 @@ void setup()
 void loop()
 {
   UpdateDeviceClockIfNeeded();
+  MeshNet_Tick();
+  static uint32_t lastCapsPush = 0;
+  if ((uint32_t)(millis() - lastCapsPush) > 5000)
+  {
+    MeshNet_UpdateLocalCapabilities(buildLocalCaps());
+    lastCapsPush = millis();
+  }
 
   // SMS RX/TX state machines
   monitorInputSmsStateMachine();

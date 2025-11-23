@@ -536,15 +536,17 @@ async function loadMeshState(){
     }else{
       data.nodes.forEach(node => {
         const friendly = node.friendly || node.id;
-        const status = node.online ? 'online' : 'offline';
         const me = node.local ? ' (me)' : '';
+        let status = node.online ? 'online' : 'offline';
+        let cls = node.online ? 's' : 'f';
+        if (node.authError) { status = 'auth error'; cls = 'f'; }
         const tr = document.createElement('tr');
         tr.innerHTML = `
           <td>${friendly}${me}</td>
           <td class="mono">${node.id}</td>
           <td class="mono">${node.mac || '-'}</td>
           <td class="mono">${node.ssid || '-'}</td>
-          <td><span class="badge ${node.online ? 's' : 'f'}">${status}</span></td>
+          <td><span class="badge ${cls}">${status}</span></td>
           <td><button onclick="openMeshModal('${node.id}')">View Messages</button></td>`;
         tb.appendChild(tr);
       });

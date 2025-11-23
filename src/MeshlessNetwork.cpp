@@ -81,6 +81,7 @@ struct NodeEntry
   bool             online = false;
   bool             isLocal = false;
   bool             authorized = false;
+  bool             authError = false;
 };
 
 struct SeenEvent
@@ -505,17 +506,27 @@ void handleHello(const MeshPacketHeader &header, const HelloPayload &payload)
   // Enforce mesh "auth" via matching SSID and authHash
   if (String(payload.ssid) != g_localSsid || payload.authHash != g_localAuthHash)
   {
-    logf(1, "[MESH] Reject HELLO from %s due to auth/ssid mismatch.\n", formatMacString(header.originMac).c_str());
+    NodeEntry &node = ensureNode(header.originMac);
+    node.online = false;
+    node.authorized = false;
+    node.authError = true;
+    node.ssid = payload.ssid;
+    node.authHash = payload.authHash;
+    logf(1, "[MESH] Reject HELLO from %s due to auth/ssid mismatch (their ssid=%s hash=%08X, mine ssid=%s hash=%08X).\n",
+         formatMacString(header.originMac).c_str(),
+         payload.ssid, payload.authHash,
+         g_localSsid.c_str(), g_localAuthHash);
     return;
   }
 
   NodeEntry &node = ensureNode(header.originMac);
   bool wasOnline = node.online;
-  node.nodeId = payload.nodeId[0] ? String(payload.nodeId) : shortMac(header.originMac);
+  node.nodeId = formatMacString(header.originMac);
   node.friendlyName = payload.friendly[0] ? String(payload.friendly) : node.nodeId;
   node.ssid = payload.ssid;
   node.authHash = payload.authHash;
   node.authorized = true;
+  node.authError = false;
   node.caps = decodeCaps(payload.capsMask, payload.sensorCount);
   node.online = true;
   node.lastSeenMs = millis();
@@ -747,6 +758,7 @@ void MeshNet_SetLocalSsid(const String &ssid)
 void MeshNet_SetAuth(const String &ssid, const String &password)
 {
   g_localAuthHash = simpleHash(ssid, password);
+  logf(1, "[AUTH] mesh_name=%s mesh_pass=%s hash=%08X\n", ssid.c_str(), password.c_str(), g_localAuthHash);
   if (g_initialized)
     updateLocalNodeEntry();
 }
@@ -924,6 +936,7 @@ void MeshNet_SerializeNodes(JsonArray arr)
     obj["local"] = node.isLocal;
     obj["online"] = node.online;
     obj["ageMs"] = node.lastSeenMs ? (uint32_t)(now - node.lastSeenMs) : 0;
+    obj["authError"] = node.authError;
     JsonObject caps = obj.createNestedObject("caps");
     caps["sim"] = node.caps.hasSim;
     caps["smsAlert"] = node.caps.smsAlertEnabled;

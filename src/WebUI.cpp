@@ -87,12 +87,12 @@ const char index_html[] PROGMEM = R"rawliteral(
 <div id="wifiModal" class="modal hidden">
   <div class="modal-content">
     <span class="modal-close" onclick="closeModal('wifiModal')">&times;</span>
-    <h3>Mesh Wi-Fi</h3>
-    <label for="meshSsid">Mesh SSID</label>
-    <input type="text" id="meshSsid" placeholder="Mesh SSID"/>
+    <h3>Mesh Network (elixMesh)</h3>
+    <label for="meshSsid">Mesh Name</label>
+    <input type="text" id="meshSsid" placeholder="Mesh name (default: elixMesh)"/>
     <label for="meshPass">Mesh Password</label>
-    <input type="password" id="meshPass" placeholder="Mesh password"/>
-    <label><input type="checkbox" id="meshPassShow" onchange="toggleMeshPass()"/> Show password</label>
+    <input type="password" id="meshPass" placeholder="Mesh password (default: 12345678)"/>
+    <label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="meshPassShow" onchange="toggleMeshPass()"/> <span>Show password</span></label>
     <button onclick="saveMeshWifi()">Save Mesh Wi-Fi</button>
     <p class="error" id="meshMsg"></p>
   </div>
@@ -365,8 +365,8 @@ function render(){
 }
 
 function populateMeshSettings(keys){
-  const ssidKey = keys.find(k => k.key === 'wifi_Ssid_Name');
-  const passKey = keys.find(k => k.key === 'Ssid_Password');
+  const ssidKey = keys.find(k => k.key === 'mesh_name');
+  const passKey = keys.find(k => k.key === 'mesh_pass');
   const ssidInput = $('meshSsid');
   const passInput = $('meshPass');
   if (ssidInput && ssidKey) ssidInput.value = ssidKey.value || '';

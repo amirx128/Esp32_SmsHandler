@@ -314,6 +314,10 @@ String ssidNameDefault = "ElixHome";
 String ssidPasswordDefault = "12345678";
 String ssidName;
 String ssidPassword;
+String meshNameDefault = "elixMesh";
+String meshPasswordDefault = "12345678";
+String meshName;
+String meshPassword;
 String username = "admin";
 String userPassword = "1234";
 String deviceName;
@@ -352,6 +356,8 @@ ConfigKey defaultKeys[] = {
     {"SmsAlertEnabled",  "                                        ",     "bool",   "true",               "",   "",    "true,false", false},
     {"SmsTxEnabled",     "                  SMS",             "bool",   "true",               "",   "",    "true,false", false},
     {"WifiEnabled",      "                  WiFi (SoftAP)",   "bool",   "true",               "",   "",    "true,false", false},
+    {"mesh_name",        "Mesh Name",                        "string", meshNameDefault,       "3",  "32",  "",            true},
+    {"mesh_pass",        "Mesh Password",                    "string", meshPasswordDefault,   "8",  "32",  "",            true},
 
     //                   (MQ)
     #if HAS_GAS
@@ -2419,10 +2425,10 @@ void EnsurePreferencesFresh()
   if (!currentHash.length())
     currentHash = "nohash";
   const String buildMarker = String(__DATE__) + " " + String(__TIME__);
-  String storedHash = prefs.getString("fw_hash", "");
-  String storedBuild = prefs.getString("fw_build", "");
+  String storedHash = prefs.isKey("fw_hash") ? prefs.getString("fw_hash", "") : "";
+  String storedBuild = prefs.isKey("fw_build") ? prefs.getString("fw_build", "") : "";
   bool firmwareChanged = (storedHash != currentHash) || (storedBuild != buildMarker);
-  if (firmwareChanged)
+  if (firmwareChanged || FORCE_CLEAR_PREFS)
   {
     logf(1, "[CFG] Firmware/upload detected (hash %s -> %s, build %s -> %s). Clearing prefs.\n",
          storedHash.c_str(), currentHash.c_str(),
@@ -2431,6 +2437,15 @@ void EnsurePreferencesFresh()
     prefsClock.clear();
     prefs.putString("fw_hash", currentHash);
     prefs.putString("fw_build", buildMarker);
+
+    if (FORCE_CLEAR_PREFS)
+    {
+      uint64_t mac = ESP.getEfuseMac();
+      String freshSsid = String("ElixMesh_") + formatMacCompact(mac);
+      prefs.putString("wifi_Ssid_Name", freshSsid);
+      prefs.putString("Ssid_Password", ssidPasswordDefault);
+      prefs.putString("deviceName", String("Node_") + formatMacCompact(mac));
+    }
   }
 }
 
@@ -2454,8 +2469,10 @@ void SetPublicVariablesFromPrefs()
 
   // WiFi creds + identity
   uint64_t mac = ESP.getEfuseMac();
-  ssidName = prefs.getString("wifi_Ssid_Name", ssidNameDefault);
+  ssidName = prefs.getString("wifi_Ssid_Name", String("elix_Node_") + formatMacShort(mac));
   ssidPassword = prefs.getString("Ssid_Password", ssidPasswordDefault);
+  meshName = prefs.getString("mesh_name", meshNameDefault);
+  meshPassword = prefs.getString("mesh_pass", meshPasswordDefault);
   deviceName = prefs.getString("deviceName", "");
 
   String trimmedDevice = deviceName;
@@ -2467,20 +2484,12 @@ void SetPublicVariablesFromPrefs()
   }
   deviceName = trimmedDevice;
 
+  // SoftAP SSID per node
   String trimmedSsid = ssidName;
   trimmedSsid.trim();
-  if (trimmedSsid.equalsIgnoreCase(ssidNameDefault) || trimmedSsid.equalsIgnoreCase("ElixHome"))
-  {
-    trimmedSsid = "";
-  }
   if (trimmedSsid.length() < 4)
   {
-    trimmedSsid = String("ElixIoT_") + formatMacCompact(mac);
-    prefs.putString("wifi_Ssid_Name", trimmedSsid);
-  }
-  if (trimmedSsid.equalsIgnoreCase(trimmedDevice))
-  {
-    trimmedSsid = String("ElixIoT_") + formatMacCompact(mac) + "_AP";
+    trimmedSsid = String("elix_Node_") + formatMacShort(mac);
     prefs.putString("wifi_Ssid_Name", trimmedSsid);
   }
   ssidName = trimmedSsid;
@@ -2491,7 +2500,9 @@ void SetPublicVariablesFromPrefs()
     prefs.putString("Ssid_Password", ssidPassword);
   }
   MeshNet_SetFriendlyName(deviceName);
-
+  MeshNet_SetLocalSsid(meshName);
+  MeshNet_SetAuth(meshName, meshPassword);
+  MeshNet_SetAuth(ssidName, ssidPassword);
 
   public_SystemStatus = prefs.getString("SystemEnabled", "true") == "true";
   public_PirEnabled = false;
@@ -2550,6 +2561,7 @@ void setup()
   Serial.println("Starting ESP32 AP...");
 
   prefs.begin("config", false);
+  prefs.clear();
   prefsClock.begin("clock", false);
   EnsurePreferencesFresh();
 
@@ -2622,6 +2634,8 @@ void loop()
   //                                           (                     )
   SetAllarmState();
 }
+
+
 
 
 

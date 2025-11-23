@@ -35,6 +35,7 @@ using MeshEventHandler = void (*)(const MeshEventInfo &info);
 
 void    MeshNet_SetFriendlyName(const String &name);
 void    MeshNet_SetLocalSsid(const String &ssid);
+void    MeshNet_SetAuth(const String &ssid, const String &password);
 void    MeshNet_UpdateLocalCapabilities(const NodeCapabilities &caps);
 void    MeshNet_Init(MeshEventHandler handler);
 void    MeshNet_Tick();

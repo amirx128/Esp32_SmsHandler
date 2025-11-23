@@ -20,6 +20,7 @@ constexpr uint32_t kNodeOfflineMs      = 100000;
 constexpr uint32_t kEventResendMs      = 2000;
 constexpr uint32_t kEventLifetimeMs    = 60000;
 constexpr size_t   kMaxHistory         = 1024;
+constexpr size_t   kPersistMaxEvents   = 20;
 constexpr uint8_t  kAckTtl             = 5;
 constexpr uint8_t  kFlagsRequiresSms   = 0x01;
 constexpr uint8_t  kFlagsRequiresSiren = 0x02;
@@ -47,6 +48,7 @@ struct HelloPayload
   char     nodeId[8];
   char     friendly[16];
   char     ssid[32];
+  uint32_t authHash;
   uint16_t capsMask;
   uint8_t  sensorCount;
 } __attribute__((packed));
@@ -73,10 +75,12 @@ struct NodeEntry
   String           nodeId;
   String           friendlyName;
   String           ssid;
+  uint32_t         authHash = 0;
   NodeCapabilities caps;
   uint32_t         lastSeenMs = 0;
   bool             online = false;
   bool             isLocal = false;
+  bool             authorized = false;
 };
 
 struct SeenEvent
@@ -145,6 +149,7 @@ uint32_t                   g_eventCounter = 0;
 bool                       g_capsDirty = true;
 const uint8_t              kBroadcastAddr[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 Preferences                g_histPrefs;
+uint32_t                   g_localAuthHash = 0;
 
 // Forward declarations
 void persistHistory();
@@ -166,6 +171,21 @@ String formatMacString(uint64_t mac)
   snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]);
   return String(buf);
+}
+
+uint32_t simpleHash(const String &a, const String &b)
+{
+  // Simple FNV-1a style hash over combined strings (not cryptographic)
+  uint32_t h = 2166136261u;
+  auto mix = [&](char c)
+  {
+    h ^= (uint8_t)c;
+    h *= 16777619u;
+  };
+  for (size_t i = 0; i < a.length(); ++i) mix(a[i]);
+  mix('|');
+  for (size_t i = 0; i < b.length(); ++i) mix(b[i]);
+  return h;
 }
 
 String capsToString(const NodeCapabilities &caps)
@@ -206,6 +226,7 @@ NodeEntry &ensureNode(uint64_t mac)
   entry.nodeId = shortMac(mac);
   entry.friendlyName = entry.nodeId;
   entry.online = false;
+  entry.authorized = false;
   g_nodes.push_back(entry);
   return g_nodes.back();
 }
@@ -220,6 +241,8 @@ void updateLocalNodeEntry()
   me.friendlyName = g_friendlyName.length() ? g_friendlyName : String("Node_") + me.nodeId;
   me.ssid = g_localSsid;
   me.caps = g_localCaps;
+  me.authHash = g_localAuthHash;
+  me.authorized = true;
 }
 
 uint16_t encodeCaps(const NodeCapabilities &caps)
@@ -384,6 +407,7 @@ void broadcastHello()
   copyString(payload.nodeId, sizeof(payload.nodeId), g_localNodeId);
   copyString(payload.friendly, sizeof(payload.friendly), g_friendlyName.length() ? g_friendlyName : g_localNodeId);
   copyString(payload.ssid, sizeof(payload.ssid), g_localSsid);
+  payload.authHash = g_localAuthHash;
   payload.capsMask = encodeCaps(g_localCaps);
   payload.sensorCount = g_localCaps.sensorCount;
   sendPacket(PKT_HELLO, 0, 0, g_localMac, reinterpret_cast<uint8_t *>(&payload), sizeof(payload));
@@ -478,11 +502,20 @@ void applyAck(uint32_t messageId, uint64_t eventOrigin, uint64_t ackNode)
 
 void handleHello(const MeshPacketHeader &header, const HelloPayload &payload)
 {
+  // Enforce mesh "auth" via matching SSID and authHash
+  if (String(payload.ssid) != g_localSsid || payload.authHash != g_localAuthHash)
+  {
+    logf(1, "[MESH] Reject HELLO from %s due to auth/ssid mismatch.\n", formatMacString(header.originMac).c_str());
+    return;
+  }
+
   NodeEntry &node = ensureNode(header.originMac);
   bool wasOnline = node.online;
   node.nodeId = payload.nodeId[0] ? String(payload.nodeId) : shortMac(header.originMac);
   node.friendlyName = payload.friendly[0] ? String(payload.friendly) : node.nodeId;
   node.ssid = payload.ssid;
+  node.authHash = payload.authHash;
+  node.authorized = true;
   node.caps = decodeCaps(payload.capsMask, payload.sensorCount);
   node.online = true;
   node.lastSeenMs = millis();
@@ -505,6 +538,11 @@ void handleEvent(const MeshPacketHeader &header, const EventPayload &payload)
   markEventSeen(header.messageId, header.originMac);
 
   NodeEntry &node = ensureNode(header.originMac);
+  if (!node.authorized)
+  {
+    logf(1, "[MESH] Drop EVENT from unauthorized node %s\n", formatMacString(header.originMac).c_str());
+    return;
+  }
   node.online = true;
   node.lastSeenMs = millis();
 
@@ -551,6 +589,13 @@ void handleAck(const MeshPacketHeader &header, const AckPayload &payload)
   if (ackSeen(payload.messageId, payload.eventOrigin, header.originMac))
     return;
   markAckSeen(payload.messageId, payload.eventOrigin, header.originMac);
+
+  NodeEntry &node = ensureNode(header.originMac);
+  if (!node.authorized)
+  {
+    logf(1, "[MESH] Drop ACK from unauthorized node %s\n", formatMacString(header.originMac).c_str());
+    return;
+  }
 
   applyAck(payload.messageId, payload.eventOrigin, header.originMac);
 
@@ -610,10 +655,10 @@ void onEspNowSent(const uint8_t *mac, esp_now_send_status_t status)
 // -------- History persistence (keeps recent mesh events across reboot) --------
 void persistHistory()
 {
-  DynamicJsonDocument doc(8192);
+  DynamicJsonDocument doc(4096);
   JsonArray arr = doc.createNestedArray("events");
   size_t count = 0;
-  for (auto it = g_history.rbegin(); it != g_history.rend() && count < 50; ++it, ++count)
+  for (auto it = g_history.rbegin(); it != g_history.rend() && count < kPersistMaxEvents; ++it, ++count)
   {
     const auto &entry = *it;
     JsonObject obj = arr.createNestedObject();
@@ -631,7 +676,21 @@ void persistHistory()
   }
   String out;
   serializeJson(doc, out);
-  g_histPrefs.putString("hist", out);
+  // If payload is still too large for NVS, progressively trim
+  while (out.length() > 1800 && count > 5)
+  {
+    arr.remove(arr.size() - 1);
+    count--;
+    out = "";
+    serializeJson(doc, out);
+  }
+  size_t written = g_histPrefs.putString("hist", out);
+  if (written == 0)
+  {
+    // Try clearing the namespace once and retry
+    g_histPrefs.clear();
+    written = g_histPrefs.putString("hist", out);
+  }
 }
 
 void loadHistory()
@@ -639,7 +698,7 @@ void loadHistory()
   String data = g_histPrefs.getString("hist", "");
   if (!data.length())
     return;
-  DynamicJsonDocument doc(8192);
+  DynamicJsonDocument doc(4096);
   if (deserializeJson(doc, data) != DeserializationError::Ok)
     return;
   JsonArray arr = doc["events"].as<JsonArray>();
@@ -681,6 +740,13 @@ void MeshNet_SetLocalSsid(const String &ssid)
   if (g_initialized)
     updateLocalNodeEntry();
   g_capsDirty = true;
+}
+
+void MeshNet_SetAuth(const String &ssid, const String &password)
+{
+  g_localAuthHash = simpleHash(ssid, password);
+  if (g_initialized)
+    updateLocalNodeEntry();
 }
 
 void MeshNet_UpdateLocalCapabilities(const NodeCapabilities &caps)
@@ -895,3 +961,4 @@ void MeshNet_SerializeEvents(JsonArray arr)
 }
 
 
+constexpr size_t   kPersistMaxEvents   = 20;   // cap persisted history entries to fit NVS blob

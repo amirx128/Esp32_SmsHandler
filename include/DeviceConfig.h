@@ -39,3 +39,8 @@
 #include <stdint.h>
 // Global toggle: 1 = allow serial logs, 0 = silence all logs
 extern uint8_t logInSerialIsOn;
+
+// If true, preferences (config + clock) will be cleared on each boot
+#ifndef FORCE_CLEAR_PREFS
+#define FORCE_CLEAR_PREFS 1
+#endif

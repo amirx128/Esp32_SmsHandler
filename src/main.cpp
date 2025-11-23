@@ -2500,7 +2500,6 @@ void SetPublicVariablesFromPrefs()
   MeshNet_SetFriendlyName(deviceName);
   MeshNet_SetLocalSsid(meshName);
   MeshNet_SetAuth(meshName, meshPassword);
-  MeshNet_SetAuth(ssidName, ssidPassword);
 
   public_SystemStatus = prefs.getString("SystemEnabled", "true") == "true";
   public_PirEnabled = false;

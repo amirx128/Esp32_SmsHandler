@@ -81,6 +81,14 @@ void handleMeshEvent(const MeshEventInfo &info)
   bool isLocal = (info.originMac == ESP.getEfuseMac());
   String tag = isLocal ? " (me)" : "";
   String labeledName = originName + tag;
+  String payloadTrim = info.payload;
+  payloadTrim.trim();
+  if (payloadTrim.startsWith("GAS 0"))
+  {
+    Serial.printf("[MESH] Ignoring gas alarm from %s (%s) due to missing sensor indication.\n",
+                  labeledName.c_str(), macFull.c_str());
+    return;
+  }
   g_remoteAlarm.pending = true;
   g_remoteAlarm.description = labeledName + "[" + macShort + "]:" + info.type + ":" + info.payload;
   g_remoteAlarm.requiresSms = info.requiresSms;
@@ -2804,8 +2812,27 @@ void PollSensorsAndDecide()
   }
   static bool prevLocalAlarm = false;
   if (localAlarmNow && !prevLocalAlarm)
-    Serial.printf("[ALRM] Local trigger: %s (window=%u ms, total=%u)\n",
-                  localCauseDetail.c_str(), (unsigned)WINDOW_MS, (unsigned)(V + P));
+  {
+    String combo;
+    if (gasAlarmNow || tempAlarmNow || humAlarmNow)
+    {
+      combo = localCauseDetail;
+    }
+    else if (V > 0 && P == 0)
+    {
+      combo = String("Vibration only x") + String(V);
+    }
+    else if (P > 0 && V == 0)
+    {
+      combo = String("PIR only x") + String(P);
+    }
+    else
+    {
+      combo = String("Vibration x") + String(V) + " + PIR x" + String(P);
+    }
+    Serial.printf("[ALRM] Local trigger: %s | total=%u (threshold=%u, window=%u ms)\n",
+                  combo.c_str(), (unsigned)(V + P), (unsigned)ALARM_THRESHOLD, (unsigned)WINDOW_MS);
+  }
   prevLocalAlarm = localAlarmNow;
 
   // ---                       ---

@@ -223,7 +223,7 @@ NodeEntry &ensureNode(uint64_t mac)
     return *existing;
   NodeEntry entry;
   entry.mac = mac;
-  entry.nodeId = shortMac(mac);
+  entry.nodeId = formatMacString(mac); // use full MAC as nodeId to avoid collisions
   entry.friendlyName = entry.nodeId;
   entry.online = false;
   entry.authorized = false;
@@ -537,12 +537,13 @@ void handleEvent(const MeshPacketHeader &header, const EventPayload &payload)
     return;
   markEventSeen(header.messageId, header.originMac);
 
-  NodeEntry &node = ensureNode(header.originMac);
-  if (!node.authorized)
+  NodeEntry *nodePtr = findNode(header.originMac);
+  if (!nodePtr || !nodePtr->authorized)
   {
     logf(1, "[MESH] Drop EVENT from unauthorized node %s\n", formatMacString(header.originMac).c_str());
     return;
   }
+  NodeEntry &node = *nodePtr;
   node.online = true;
   node.lastSeenMs = millis();
 
@@ -590,12 +591,13 @@ void handleAck(const MeshPacketHeader &header, const AckPayload &payload)
     return;
   markAckSeen(payload.messageId, payload.eventOrigin, header.originMac);
 
-  NodeEntry &node = ensureNode(header.originMac);
-  if (!node.authorized)
+  NodeEntry *nodePtr = findNode(header.originMac);
+  if (!nodePtr || !nodePtr->authorized)
   {
     logf(1, "[MESH] Drop ACK from unauthorized node %s\n", formatMacString(header.originMac).c_str());
     return;
   }
+  NodeEntry &node = *nodePtr;
 
   applyAck(payload.messageId, payload.eventOrigin, header.originMac);
 

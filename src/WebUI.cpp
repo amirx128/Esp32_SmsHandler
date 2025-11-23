@@ -380,8 +380,8 @@ async function saveMeshWifi(){
   const passEl = $('meshPass');
   const ssid = ssidEl ? ssidEl.value.trim() : '';
   const pass = passEl ? passEl.value : '';
-  let res1 = await api('/save', {key: 'wifi_Ssid_Name', value: ssid});
-  let res2 = await api('/save', {key: 'Ssid_Password', value: pass});
+  let res1 = await api('/save', {key: 'mesh_name', value: ssid});
+  let res2 = await api('/save', {key: 'mesh_pass', value: pass});
   if (msgEl){
     if (res1.success && res2.success) msgEl.textContent = 'Saved mesh Wi-Fi settings.';
     else msgEl.textContent = (res1.error || res2.error || 'Save error');

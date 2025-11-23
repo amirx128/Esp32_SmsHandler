@@ -35,3 +35,7 @@
 #define HAS_DHT (DHT_PIN > 0)
 
 // Future sensors can be added here similarly.
+
+#include <stdint.h>
+// Global toggle: 1 = allow serial logs, 0 = silence all logs
+extern uint8_t logInSerialIsOn;

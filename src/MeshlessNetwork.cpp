@@ -1,4 +1,4 @@
-#include "MeshlessNetwork.h"
+﻿#include "MeshlessNetwork.h"
 
 #include <WiFi.h>
 #include <esp_now.h>
@@ -7,6 +7,9 @@
 #include <deque>
 #include <algorithm>
 #include <cstring>
+#include <Preferences.h>
+#include <ArduinoJson.h>
+#include "Logger.h"
 
 namespace
 {
@@ -141,6 +144,11 @@ uint32_t                   g_lastHelloMs = 0;
 uint32_t                   g_eventCounter = 0;
 bool                       g_capsDirty = true;
 const uint8_t              kBroadcastAddr[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+Preferences                g_histPrefs;
+
+// Forward declarations
+void persistHistory();
+void loadHistory();
 
 String shortMac(uint64_t mac)
 {
@@ -158,6 +166,26 @@ String formatMacString(uint64_t mac)
   snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]);
   return String(buf);
+}
+
+String capsToString(const NodeCapabilities &caps)
+{
+  String out;
+  if (caps.hasSim) out += "sim,";
+  if (caps.smsAlertEnabled) out += "smsAlert,";
+  if (caps.smsTxEnabled) out += "smsTx,";
+  if (caps.hasBuzzer) out += "buzzer,";
+  if (caps.hasLed) out += "led,";
+  if (caps.hasPir) out += "pir,";
+  if (caps.hasVib) out += "vib,";
+  if (caps.hasGas) out += "gas,";
+  if (caps.hasDht) out += "dht,";
+  if (caps.wifiEnabled) out += "wifi,";
+  if (out.endsWith(","))
+    out.remove(out.length() - 1);
+  if (!out.length())
+    out = "none";
+  return out;
 }
 
 NodeEntry *findNode(uint64_t mac)
@@ -460,7 +488,13 @@ void handleHello(const MeshPacketHeader &header, const HelloPayload &payload)
   node.lastSeenMs = millis();
   if (!wasOnline)
   {
-    Serial.printf("[MESH] Node %s (%s) online.\n", node.friendlyName.c_str(), node.nodeId.c_str());
+    logf(1, "[MESH] Node join -> id=%s name=%s mac=%s ssid=%s caps=%s sensors=%u\n",
+         node.nodeId.c_str(),
+         node.friendlyName.c_str(),
+         formatMacString(node.mac).c_str(),
+         node.ssid.c_str(),
+         capsToString(node.caps).c_str(),
+         node.caps.sensorCount);
   }
 }
 
@@ -488,6 +522,7 @@ void handleEvent(const MeshPacketHeader &header, const EventPayload &payload)
   history.delivered = false;
   g_history.push_back(history);
   pruneHistory();
+  persistHistory();
 
   MeshEventInfo info;
   info.messageId = String(history.originNode) + "-" + String(history.messageId, HEX);
@@ -507,6 +542,8 @@ void handleEvent(const MeshPacketHeader &header, const EventPayload &payload)
 
   if (header.ttl > 0)
     rebroadcastEvent(header, payload);
+
+  persistHistory();
 }
 
 void handleAck(const MeshPacketHeader &header, const AckPayload &payload)
@@ -570,6 +607,64 @@ void onEspNowSent(const uint8_t *mac, esp_now_send_status_t status)
   (void)status;
 }
 
+// -------- History persistence (keeps recent mesh events across reboot) --------
+void persistHistory()
+{
+  DynamicJsonDocument doc(8192);
+  JsonArray arr = doc.createNestedArray("events");
+  size_t count = 0;
+  for (auto it = g_history.rbegin(); it != g_history.rend() && count < 50; ++it, ++count)
+  {
+    const auto &entry = *it;
+    JsonObject obj = arr.createNestedObject();
+    obj["id"] = entry.messageId;
+    obj["originMac"] = entry.originMac;
+    obj["originNode"] = entry.originNode;
+    obj["originShort"] = entry.originShortId;
+    obj["type"] = entry.type;
+    obj["payload"] = entry.payload;
+    obj["ts"] = (uint64_t)entry.timestampMs;
+    obj["ttl"] = entry.initialTtl;
+    obj["requiresSms"] = entry.requiresSms;
+    obj["requiresSiren"] = entry.requiresSiren;
+    obj["delivered"] = entry.delivered;
+  }
+  String out;
+  serializeJson(doc, out);
+  g_histPrefs.putString("hist", out);
+}
+
+void loadHistory()
+{
+  String data = g_histPrefs.getString("hist", "");
+  if (!data.length())
+    return;
+  DynamicJsonDocument doc(8192);
+  if (deserializeJson(doc, data) != DeserializationError::Ok)
+    return;
+  JsonArray arr = doc["events"].as<JsonArray>();
+  if (!arr)
+    return;
+  g_history.clear();
+  for (JsonObject obj : arr)
+  {
+    HistoryEntry h;
+    h.messageId = obj["id"] | 0;
+    h.originMac = obj["originMac"] | 0;
+    h.originNode = String((const char *)obj["originNode"]);
+    h.originShortId = String((const char *)obj["originShort"]);
+    h.type = String((const char *)obj["type"]);
+    h.payload = String((const char *)obj["payload"]);
+    h.timestampMs = obj["ts"] | 0ULL;
+    h.initialTtl = obj["ttl"] | 0;
+    h.requiresSms = obj["requiresSms"] | false;
+    h.requiresSiren = obj["requiresSiren"] | false;
+    h.delivered = obj["delivered"] | false;
+    g_history.push_front(h);
+  }
+  pruneHistory();
+}
+
 } // namespace
 
 void MeshNet_SetFriendlyName(const String &name)
@@ -605,6 +700,8 @@ void MeshNet_Init(MeshEventHandler handler)
   g_localMac = ESP.getEfuseMac();
   g_localNodeId = MeshNet_GetShortMac();
   updateLocalNodeEntry();
+  g_histPrefs.begin("meshlog", false);
+  loadHistory();
 
   if (WiFi.getMode() == WIFI_MODE_NULL)
     WiFi.mode(WIFI_AP_STA);
@@ -618,11 +715,11 @@ void MeshNet_Init(MeshEventHandler handler)
     esp_now_register_recv_cb(onEspNowRecv);
     esp_now_register_send_cb(onEspNowSent);
     ensureBroadcastPeer();
-    Serial.println("[MESH] ESP-NOW initialized.");
+    logf(1, "[MESH] ESP-NOW initialized.\n");
   }
   else
   {
-    Serial.println("[MESH] Failed to init ESP-NOW.");
+    logf(1, "[MESH] Failed to init ESP-NOW.\n");
   }
 
   g_initialized = true;
@@ -644,8 +741,10 @@ void MeshNet_Tick()
       if ((uint32_t)(now - node.lastSeenMs) > kNodeOfflineMs)
       {
         node.online = false;
-        Serial.printf("[MESH] Node %s (%s) offline (timeout).\n",
-                      node.friendlyName.c_str(), node.nodeId.c_str());
+        logf(1, "[MESH] Node offline -> name=%s id=%s mac=%s (timeout)\n",
+             node.friendlyName.c_str(),
+             node.nodeId.c_str(),
+             formatMacString(node.mac).c_str());
       }
     }
   }
@@ -740,6 +839,7 @@ String MeshNet_RecordNetworkEvent(const String &type,
   if (pending)
     pending->lastSendMs = millis();
 
+  persistHistory();
   return String(history.originNode) + "-" + String(history.messageId, HEX);
 }
 
@@ -793,3 +893,5 @@ void MeshNet_SerializeEvents(JsonArray arr)
       ackArr.add(name);
   }
 }
+
+

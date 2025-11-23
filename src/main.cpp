@@ -993,12 +993,10 @@ void StartSoftAP()
     Serial.println("AP Started Successfully!");
     Serial.print("IP Address: http://");
     Serial.println(WiFi.softAPIP());
-    MeshNet_SetLocalSsid(ssidName);
   }
   else
   {
     Serial.println("AP Failed to Start!");
-    MeshNet_SetLocalSsid("");
   }
 }
 

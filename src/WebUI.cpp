@@ -575,7 +575,8 @@ async function loadMeshState(){
       const rk = (data.keys||[]).find(k =>
         k.id === currentNodeId ||
         k.sid === currentNodeId ||
-        (k.raw && (k.raw.sid === currentNodeId || k.raw.id === currentNodeId))
+        k.friendly === currentNodeId ||
+        (k.raw && (k.raw.sid === currentNodeId || k.raw.id === currentNodeId || k.raw.friendly === currentNodeId))
       );
       if (rk && rk.raw && rk.raw.keys){
         window.keys = [];
@@ -593,7 +594,8 @@ async function loadMeshState(){
     const rk = (data.keys||[]).find(k =>
       k.id === currentNodeId ||
       k.sid === currentNodeId ||
-      (k.raw && (k.raw.sid === currentNodeId || k.raw.id === currentNodeId))
+      k.friendly === currentNodeId ||
+      (k.raw && (k.raw.sid === currentNodeId || k.raw.id === currentNodeId || k.raw.friendly === currentNodeId))
     );
     if (rk && rk.raw && rk.raw.keys){
       window.keys = [];

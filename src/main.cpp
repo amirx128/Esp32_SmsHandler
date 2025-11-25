@@ -1116,6 +1116,16 @@ void HtmlFunctions()
       o["ts"] = rk.tsMs;
       o["raw"] = rk.data.as<JsonObject>();
     }
+    // Also expose local keys so UI can switch to self without waiting for mesh
+    {
+      JsonObject o = keysArr.createNestedObject();
+      o["id"] = MeshNet_GetLocalNodeId();
+      o["friendly"] = MeshNet_GetLocalFriendly();
+      o["ts"] = DeviceNowMs();
+      DynamicJsonDocument tmp(4096);
+      if (deserializeJson(tmp, buildKeysSnapshotJson()) == DeserializationError::Ok)
+        o["raw"] = tmp.as<JsonObject>();
+    }
     String out; serializeJson(doc, out);
     req->send(200, "application/json", out); });
 

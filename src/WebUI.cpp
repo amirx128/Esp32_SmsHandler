@@ -561,15 +561,27 @@ async function loadMeshState(){
   // Apply remote keys if selected
   let applied = false;
   if (currentNodeId){
+    // If requesting self, fall back to local keys immediately
+    const me = data.nodes.find(n => n.local);
+    if (me && (currentNodeId === me.id || currentNodeId === (me.friendly||me.id))){
+      await loadKeys();
+      applied = true;
+    }else{
+      const rk = (data.keys||[]).find(k => k.id === currentNodeId);
+      if (rk && rk.raw && rk.raw.keys){
+        window.keys = [];
+        rk.raw.keys.forEach(k => window.keys.push(k));
+        applied = true;
+      }
+    }
+  }
+  if (!applied && !window.keys){
     const rk = (data.keys||[]).find(k => k.id === currentNodeId);
     if (rk && rk.raw && rk.raw.keys){
       window.keys = [];
       rk.raw.keys.forEach(k => window.keys.push(k));
       applied = true;
     }
-  }
-  if (!applied && !window.keys){
-    await loadKeys();
   }
   if (applied) render();
   const tb = $('mesh-nodes-body');

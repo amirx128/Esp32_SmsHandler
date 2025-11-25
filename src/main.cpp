@@ -252,6 +252,7 @@ void handleMeshEvent(const MeshEventInfo &info)
           rk.tsMs = info.timestampMs;
           rk.nodeId = nid;
           rk.friendly = doc.containsKey("friendly") ? String((const char *)doc["friendly"]) : originName;
+          if (doc.containsKey("sid")) rk.data["sid"] = String((const char *)doc["sid"]);
           // init/clear on first page
           if (pageStart == 0 || !rk.data.containsKey("keys"))
           {
@@ -259,6 +260,7 @@ void handleMeshEvent(const MeshEventInfo &info)
             rk.data.garbageCollect();
             rk.data["id"] = nid;
             rk.data["friendly"] = rk.friendly;
+            if (doc.containsKey("sid")) rk.data["sid"] = String((const char *)doc["sid"]);
             rk.data["total"] = doc["total"] | numKeys;
             rk.data["p"] = pageStart;
             rk.data["keys"] = rk.data.createNestedArray("keys");
@@ -285,6 +287,7 @@ void handleMeshEvent(const MeshEventInfo &info)
         rk.data.garbageCollect();
         rk.data["id"] = nid;
         rk.data["friendly"] = rk.friendly;
+        if (doc.containsKey("sid")) rk.data["sid"] = String((const char *)doc["sid"]);
         rk.data["total"] = doc["total"] | numKeys;
         rk.data["p"] = pageStart;
         rk.data["keys"] = rk.data.createNestedArray("keys");
@@ -1185,6 +1188,9 @@ void HtmlFunctions()
     {
       JsonObject o = keysArr.createNestedObject();
       o["id"] = rk.nodeId;
+       // keep sid for matching short id / friendly
+      if (rk.data.containsKey("sid"))
+        o["sid"] = rk.data["sid"];
       o["friendly"] = rk.friendly;
       o["ts"] = rk.tsMs;
       o["raw"] = rk.data.as<JsonObject>();
@@ -1192,7 +1198,8 @@ void HtmlFunctions()
     // Also expose local keys so UI can switch to self without waiting for mesh
     {
       JsonObject o = keysArr.createNestedObject();
-      o["id"] = MeshNet_GetLocalNodeId();
+      o["id"] = MeshNet_GetLocalMacStr();
+      o["sid"] = MeshNet_GetLocalNodeId();
       o["friendly"] = MeshNet_GetLocalFriendly();
       o["ts"] = DeviceNowMs();
       DynamicJsonDocument tmp(4096);

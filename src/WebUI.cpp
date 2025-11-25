@@ -563,11 +563,16 @@ async function loadMeshState(){
   if (currentNodeId){
     // If requesting self, fall back to local keys immediately
     const me = data.nodes.find(n => n.local);
-    if (me && (currentNodeId === me.id || currentNodeId === (me.friendly||me.id))){
+    const isSelf = me && (currentNodeId === me.id || currentNodeId === me.mac || currentNodeId === (me.friendly||me.id));
+    if (isSelf){
       await loadKeys();
       applied = true;
     }else{
-      const rk = (data.keys||[]).find(k => k.id === currentNodeId);
+      const rk = (data.keys||[]).find(k =>
+        k.id === currentNodeId ||
+        k.sid === currentNodeId ||
+        (k.raw && (k.raw.sid === currentNodeId || k.raw.id === currentNodeId))
+      );
       if (rk && rk.raw && rk.raw.keys){
         window.keys = [];
         rk.raw.keys.forEach(k => window.keys.push(k));
@@ -581,7 +586,11 @@ async function loadMeshState(){
     }
   }
   if (!applied && !window.keys){
-    const rk = (data.keys||[]).find(k => k.id === currentNodeId);
+    const rk = (data.keys||[]).find(k =>
+      k.id === currentNodeId ||
+      k.sid === currentNodeId ||
+      (k.raw && (k.raw.sid === currentNodeId || k.raw.id === currentNodeId))
+    );
     if (rk && rk.raw && rk.raw.keys){
       window.keys = [];
       rk.raw.keys.forEach(k => window.keys.push(k));
@@ -612,7 +621,7 @@ async function loadMeshState(){
           <td class="mono">${nodeTime}</td>
           <td><div class="btn-row" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:6px;">
                 <button onclick="openMeshModal('${node.id}')">Messages</button>
-                <button onclick="requestState('${node.id}')">Fetch State</button>
+                <button onclick="requestState('${node.mac || node.id}')">Fetch State</button>
               </div></td>`;
         tb.appendChild(tr);
       });

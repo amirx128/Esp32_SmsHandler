@@ -42,7 +42,7 @@ const char index_html[] PROGMEM = R"rawliteral(
 </head>
 <body>
 
-<div id="login" class="container">
+<div id="loginBox" class="container">
   <div class="card" style="max-width:420px;margin:auto;">
     <h2>System Login</h2>
     <input type="text" id="user" placeholder="Username" />
@@ -282,7 +282,7 @@ async function tryResumeSession(){
 }
 
 async function afterLogin(preloaded){
-  $('login').classList.add('hidden');
+  $('loginBox').classList.add('hidden');
   $('main').classList.remove('hidden');
   setDeviceTimeInput(Date.now());
   await autoSyncClock();
@@ -314,12 +314,16 @@ async function afterLogin(preloaded){
 
 function logout(){
   $('main').classList.add('hidden');
-  $('login').classList.remove('hidden');
+  $('loginBox').classList.remove('hidden');
   $('user').value = $('pass').value = '';
   $('err').textContent = '';
   TOKEN = null;
   localStorage.removeItem('TOKEN');
 }
+
+// Expose handlers for inline onclick usage
+window.login = login;
+window.logout = logout;
 
 async function autoSyncClock(){
   try{

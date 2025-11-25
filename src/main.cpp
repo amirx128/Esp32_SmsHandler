@@ -249,22 +249,28 @@ void handleMeshEvent(const MeshEventInfo &info)
       {
         if (rk.nodeId == nid)
         {
-          rk.data = doc;
           rk.tsMs = info.timestampMs;
           rk.nodeId = nid;
           rk.friendly = doc.containsKey("friendly") ? String((const char *)doc["friendly"]) : originName;
-          // Merge paged keys: if p==0 reset, then append keys
+          // init/clear on first page
+          if (pageStart == 0 || !rk.data.containsKey("keys"))
+          {
+            rk.data.clear();
+            rk.data.garbageCollect();
+            rk.data["id"] = nid;
+            rk.data["friendly"] = rk.friendly;
+            rk.data["total"] = doc["total"] | numKeys;
+            rk.data["p"] = pageStart;
+            rk.data["keys"] = rk.data.createNestedArray("keys");
+          }
+          // append keys
           if (doc.containsKey("keys"))
           {
-            if (pageStart == 0 || !rk.data.containsKey("keys"))
-              rk.data["keys"] = doc["keys"];
-            else
-            {
-              JsonArray dest = rk.data["keys"].as<JsonArray>();
-              for (JsonObject k : doc["keys"].as<JsonArray>())
-                dest.add(k);
-            }
+            JsonArray dest = rk.data["keys"].as<JsonArray>();
+            for (JsonObject k : doc["keys"].as<JsonArray>())
+              dest.add(k);
           }
+          rk.data["p"] = pageStart;
           found = true;
           break;
         }
@@ -275,7 +281,19 @@ void handleMeshEvent(const MeshEventInfo &info)
         rk.nodeId = nid;
         rk.friendly = doc.containsKey("friendly") ? String((const char *)doc["friendly"]) : originName;
         rk.tsMs = info.timestampMs;
-        rk.data = doc;
+        rk.data.clear();
+        rk.data.garbageCollect();
+        rk.data["id"] = nid;
+        rk.data["friendly"] = rk.friendly;
+        rk.data["total"] = doc["total"] | numKeys;
+        rk.data["p"] = pageStart;
+        rk.data["keys"] = rk.data.createNestedArray("keys");
+        if (doc.containsKey("keys"))
+        {
+          JsonArray dest = rk.data["keys"].as<JsonArray>();
+          for (JsonObject k : doc["keys"].as<JsonArray>())
+            dest.add(k);
+        }
         g_remoteKeys.push_back(rk);
       }
     }

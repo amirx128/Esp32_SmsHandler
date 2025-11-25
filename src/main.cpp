@@ -792,7 +792,8 @@ String buildKeysPageJson(int startIndex)
     obj["idx"] = i;
   }
   doc["friendly"] = MeshNet_GetLocalFriendly();
-  doc["id"] = MeshNet_GetLocalNodeId();
+  doc["id"] = MeshNet_GetLocalMacStr();
+  doc["sid"] = MeshNet_GetLocalNodeId();
   doc["mac"] = MeshNet_GetLocalMacStr();
   doc["p"] = startIndex;
   doc["total"] = numKeys;
@@ -819,7 +820,8 @@ String buildKeysSnapshotJson()
     obj["isSystem"] = defaultKeys[i].isSystem;
   }
   doc["friendly"] = MeshNet_GetLocalFriendly();
-  doc["id"] = MeshNet_GetLocalNodeId();
+  doc["id"] = MeshNet_GetLocalMacStr();
+  doc["sid"] = MeshNet_GetLocalNodeId();
   doc["mac"] = MeshNet_GetLocalMacStr();
   String out;
   serializeJson(doc, out);

@@ -195,7 +195,7 @@ const char index_html[] PROGMEM = R"rawliteral(
 
 <script>
 let TOKEN = null;
-let meshState = {nodes:[], events:[]};
+let meshState = {nodes:[], events:[], states:[]};
 
 function $(id){ return document.getElementById(id); }
 
@@ -550,7 +550,10 @@ async function loadMeshState(){
           <td class="mono">${node.ssid || '-'}</td>
           <td><span class="badge ${cls}">${status}</span></td>
           <td class="mono">${nodeTime}</td>
-          <td><button onclick="openMeshModal('${node.id}')">View Messages</button></td>`;
+          <td><div class="btn-row" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:6px;">
+                <button onclick="openMeshModal('${node.id}')">Messages</button>
+                <button onclick="requestState('${node.id}')">Fetch State</button>
+              </div></td>`;
         tb.appendChild(tr);
       });
     }
@@ -584,6 +587,13 @@ function openMeshModal(nodeId){
       <td>${(evt.acks||[]).join(', ') || '-'}</td>`;
     body.appendChild(tr);
   });
+}
+
+async function requestState(nodeId){
+  await api('/mesh/requestState', { nodeId });
+  // Wait a bit then reload mesh state to pick new state
+  setTimeout(loadMeshState, 1000);
+  setTimeout(loadMeshState, 3000);
 }
 
 function closeMeshModal(){ closeModal('meshModal'); }

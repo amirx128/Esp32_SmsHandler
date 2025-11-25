@@ -52,5 +52,6 @@ String  MeshNet_RecordNetworkEvent(const String &type,
                                    bool requiresSiren,
                                    uint8_t ttl,
                                    uint64_t timestampMs);
+String  MeshNet_GetLocalFriendly();
 void    MeshNet_SerializeNodes(JsonArray arr);
 void    MeshNet_SerializeEvents(JsonArray arr);

@@ -32,6 +32,20 @@ void EnsurePreferencesFresh();
 void ApplyClockFromMs(uint64_t timestampMs, bool broadcastMesh);
 String formatTimestampReadable(uint64_t timestampMs);
 bool IsValidEpoch(uint64_t ms);
+String MeshNet_GetLocalFriendly();
+uint64_t DeviceNowMs();
+extern const uint8_t kTimeSyncTtl;
+
+// Forward declare public state vars used in mesh state sharing
+extern bool public_PirEnabled;
+extern bool public_VibEnabled;
+extern bool public_LedEnabled;
+extern bool public_AlertEnabled_Buzzer;
+extern int  public_GasValue;
+#if HAS_DHT
+extern float public_TempValue;
+extern float public_HumValue;
+#endif
 
 String formatMacFull(uint64_t mac)
 {
@@ -70,6 +84,16 @@ struct MeshRemoteAlarm
 MeshRemoteAlarm g_remoteAlarm;
 uint32_t g_lastNetworkAlarmMs = 0;
 const uint32_t kNetworkAlarmMinIntervalMs = 5000;
+
+struct RemoteState
+{
+  String nodeId;
+  String friendly;
+  uint64_t tsMs = 0;
+  DynamicJsonDocument data;
+  RemoteState() : data(512) {}
+};
+std::vector<RemoteState> g_remoteStates;
 
 // ---- Time formatting (UNCHANGED: +12600 and localtime) ----
 void printTimestampReadable(uint64_t timestampMs)
@@ -112,6 +136,65 @@ void handleMeshEvent(const MeshEventInfo &info)
            labeledName.c_str(),
            macFull.c_str(),
            formatTimestampReadable(remoteMs).c_str());
+    }
+    return;
+  }
+  if (typeUpper == "STATE_REQ")
+  {
+    // payload carries target nodeId
+    String target = payloadTrim;
+    target.trim();
+    if (target.length() == 0 || target == MeshNet_GetLocalNodeId() || target == MeshNet_GetLocalFriendly())
+    {
+      // Build compact state JSON
+      DynamicJsonDocument doc(256);
+      doc["node"] = MeshNet_GetLocalFriendly();
+      doc["id"] = MeshNet_GetLocalNodeId();
+      doc["time"] = DeviceNowMs();
+      doc["gas"] = public_GasValue;
+#if HAS_DHT
+      doc["temp"] = public_TempValue;
+      doc["hum"] = public_HumValue;
+#endif
+      doc["pir"] = public_PirEnabled;
+      doc["vib"] = public_VibEnabled;
+      doc["led"] = public_LedEnabled;
+      doc["buz"] = public_AlertEnabled_Buzzer;
+      String out;
+      serializeJson(doc, out);
+      MeshNet_RecordNetworkEvent("STATE_RES", out, false, false, kTimeSyncTtl, DeviceNowMs());
+    }
+    return;
+  }
+  if (typeUpper == "STATE_RES")
+  {
+    // payload is JSON snapshot
+    DynamicJsonDocument doc(512);
+    if (deserializeJson(doc, info.payload) == DeserializationError::Ok)
+    {
+      String nid = doc.containsKey("id") ? String((const char *)doc["id"]) : originName;
+      bool found = false;
+      for (auto &st : g_remoteStates)
+      {
+        if (st.nodeId == nid)
+        {
+          st.data = doc;
+          st.tsMs = info.timestampMs;
+          st.nodeId = nid;
+          st.friendly = doc.containsKey("node") ? String((const char *)doc["node"]) : originName;
+          found = true;
+          break;
+        }
+      }
+      if (!found)
+      {
+        RemoteState st;
+        st.nodeId = nid;
+        st.friendly = doc.containsKey("node") ? String((const char *)doc["node"]) : originName;
+        st.tsMs = info.timestampMs;
+        st.data = doc;
+        g_remoteStates.push_back(st);
+      }
     }
     return;
   }
@@ -869,6 +952,15 @@ void HtmlFunctions()
     MeshNet_SerializeNodes(nodes);
     JsonArray events = doc.createNestedArray("events");
     MeshNet_SerializeEvents(events);
+    JsonArray states = doc.createNestedArray("states");
+    for (auto &st : g_remoteStates)
+    {
+      JsonObject o = states.createNestedObject();
+      o["id"] = st.nodeId;
+      o["friendly"] = st.friendly;
+      o["ts"] = st.tsMs;
+      o["raw"] = st.data.as<JsonObject>();
+    }
     String out; serializeJson(doc, out);
     req->send(200, "application/json", out); });
 
@@ -887,6 +979,22 @@ void HtmlFunctions()
     doc["pct"]     = pct;
     String out; serializeJson(doc, out);
     req->send(200, "application/json", out); });
+
+  server.addHandler(new AsyncCallbackJsonWebHandler("/api/mesh/requestState", [](AsyncWebServerRequest *request, JsonVariant &json)
+                                                    {
+    if (!authenticateWeb(request)) { request->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
+    if (!json.is<JsonObject>()) { request->send(400,"application/json","{\"error\":\"         JSON                      \"}"); return; }
+    String target = json["nodeId"] | "";
+    if (target.length() == 0)
+    {
+      request->send(400,"application/json","{\"error\":\"nodeId required\"}");
+      return;
+    }
+    MeshNet_RecordNetworkEvent("STATE_REQ", target, false, false, kTimeSyncTtl, DeviceNowMs());
+    DynamicJsonDocument resp(128);
+    resp["success"] = true;
+    String out; serializeJson(resp, out);
+    request->send(200, "application/json", out); }));
 
   server.addHandler(new AsyncCallbackJsonWebHandler("/api/login", [](AsyncWebServerRequest *request, JsonVariant &json)
                                                     {

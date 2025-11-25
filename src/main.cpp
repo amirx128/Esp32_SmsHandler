@@ -42,7 +42,7 @@ String buildKeysPageJson(int startIndex);
 extern Preferences prefs;
 extern ConfigKey defaultKeys[];
 extern int numKeys;
-const uint8_t kKeysPerPage = 3; // keep mesh payload small
+const uint8_t kKeysPerPage = 2; // keep mesh payload small
 
 // Forward declare public state vars used in mesh state sharing
 extern bool public_PirEnabled;

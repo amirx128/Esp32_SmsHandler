@@ -159,7 +159,8 @@ void handleMeshEvent(const MeshEventInfo &info)
     // payload carries target nodeId
     String target = payloadTrim;
     target.trim();
-    if (target.length() == 0 || target == MeshNet_GetLocalNodeId() || target == MeshNet_GetLocalFriendly())
+    String localMacFull = MeshNet_GetLocalMacStr();
+    if (target.length() == 0 || target == MeshNet_GetLocalNodeId() || target == MeshNet_GetLocalFriendly() || target == localMacFull)
     {
       // Build compact state JSON
       DynamicJsonDocument doc(256);
@@ -219,7 +220,8 @@ void handleMeshEvent(const MeshEventInfo &info)
     logf(1, "[MESH] KEYS_REQ from %s target=%s\n", labeledName.c_str(), payloadTrim.c_str());
     String target = payloadTrim;
     target.trim();
-    if (target.length() == 0 || target == MeshNet_GetLocalNodeId() || target == MeshNet_GetLocalFriendly())
+    String localMacFull = MeshNet_GetLocalMacStr();
+    if (target.length() == 0 || target == MeshNet_GetLocalNodeId() || target == MeshNet_GetLocalFriendly() || target == localMacFull)
     {
       String out = buildKeysSnapshotJson();
       MeshNet_RecordNetworkEvent("KEYS_RES", out, false, false, kTimeSyncTtl, DeviceNowMs());
@@ -267,7 +269,8 @@ void handleMeshEvent(const MeshEventInfo &info)
       String target = doc["id"] | "";
       String key = doc["key"] | "";
       String val = doc["value"] | "";
-      if (target.length() == 0 || target == MeshNet_GetLocalNodeId() || target == MeshNet_GetLocalFriendly())
+      String localMacFull = MeshNet_GetLocalMacStr();
+      if (target.length() == 0 || target == MeshNet_GetLocalNodeId() || target == MeshNet_GetLocalFriendly() || target == localMacFull)
       {
         String res = validateKey(key, val);
         bool ok = (res == "1");

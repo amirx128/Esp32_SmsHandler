@@ -772,15 +772,17 @@ void loadHistory()
     HistoryEntry h;
     h.messageId = obj["id"] | 0;
     h.originMac = obj["originMac"] | 0;
-    h.originNode = String((const char *)obj["originNode"]);
-    h.originShortId = String((const char *)obj["originShort"]);
-    h.type = String((const char *)obj["type"]);
-    h.payload = String((const char *)obj["payload"]);
+    h.originNode = String((const char *)(obj["originNode"] | ""));
+    h.originShortId = String((const char *)(obj["originShort"] | ""));
+    h.type = String((const char *)(obj["type"] | ""));
+    h.payload = String((const char *)(obj["payload"] | ""));
     h.timestampMs = obj["ts"] | 0ULL;
     h.initialTtl = obj["ttl"] | 0;
     h.requiresSms = obj["requiresSms"] | false;
     h.requiresSiren = obj["requiresSiren"] | false;
     h.delivered = obj["delivered"] | false;
+    if (h.originNode.length() == 0 && h.originMac == 0)
+      continue; // skip malformed entries
     g_history.push_front(h);
   }
   pruneHistory();

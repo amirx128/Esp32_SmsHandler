@@ -1169,34 +1169,72 @@ void HtmlFunctions()
   server.on("/api/mesh/state", HTTP_GET, [](AsyncWebServerRequest *req)
             {
     if (!authenticateWeb(req)) { req->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
-    DynamicJsonDocument doc(16384);
-    JsonArray nodes = doc.createNestedArray("nodes");
-    MeshNet_SerializeNodes(nodes);
-    JsonArray events = doc.createNestedArray("events");
-    MeshNet_SerializeEvents(events);
-    JsonArray states = doc.createNestedArray("states");
-    for (auto &st : g_remoteStates)
+
+    auto buildStateDoc = []() -> DynamicJsonDocument {
+      DynamicJsonDocument doc(32768);
+      JsonArray nodes = doc.createNestedArray("nodes");
+      MeshNet_SerializeNodes(nodes);
+      JsonArray events = doc.createNestedArray("events");
+      MeshNet_SerializeEvents(events);
+      JsonArray states = doc.createNestedArray("states");
+      for (auto &st : g_remoteStates)
+      {
+        JsonObject o = states.createNestedObject();
+        o["id"] = st.nodeId;
+        o["friendly"] = st.friendly;
+        o["ts"] = st.tsMs;
+        o["raw"] = st.data.as<JsonObject>();
+      }
+      JsonArray keysArr = doc.createNestedArray("keys");
+      for (auto &rk : g_remoteKeys)
+      {
+        JsonObject o = keysArr.createNestedObject();
+        o["id"] = rk.nodeId;
+        if (rk.data.containsKey("sid")) o["sid"] = rk.data["sid"];
+        o["friendly"] = rk.friendly;
+        o["ts"] = rk.tsMs;
+        o["raw"] = rk.data.as<JsonObject>();
+      }
+      // local keys snapshot (self)
+      {
+        JsonObject o = keysArr.createNestedObject();
+        o["id"] = MeshNet_GetLocalMacStr();
+        o["sid"] = MeshNet_GetLocalNodeId();
+        o["friendly"] = MeshNet_GetLocalFriendly();
+        o["ts"] = DeviceNowMs();
+        DynamicJsonDocument tmp(4096);
+        if (deserializeJson(tmp, buildKeysSnapshotJson()) == DeserializationError::Ok)
+          o["raw"] = tmp.as<JsonObject>();
+      }
+      return doc;
+    };
+
+    DynamicJsonDocument doc = buildStateDoc();
+    if (doc.overflowed())
     {
-      JsonObject o = states.createNestedObject();
-      o["id"] = st.nodeId;
-      o["friendly"] = st.friendly;
-      o["ts"] = st.tsMs;
-      o["raw"] = st.data.as<JsonObject>();
-    }
-    JsonArray keysArr = doc.createNestedArray("keys");
-    for (auto &rk : g_remoteKeys)
-    {
-      JsonObject o = keysArr.createNestedObject();
-      o["id"] = rk.nodeId;
-       // keep sid for matching short id / friendly
-      if (rk.data.containsKey("sid"))
-        o["sid"] = rk.data["sid"];
-      o["friendly"] = rk.friendly;
-      o["ts"] = rk.tsMs;
-      o["raw"] = rk.data.as<JsonObject>();
-    }
-    // Also expose local keys so UI can switch to self without waiting for mesh
-    {
+      logf(1, "[API] mesh/state overflow -> rebuilding without events\n");
+      DynamicJsonDocument slim(24576);
+      JsonArray nodes = slim.createNestedArray("nodes");
+      MeshNet_SerializeNodes(nodes);
+      JsonArray states = slim.createNestedArray("states");
+      for (auto &st : g_remoteStates)
+      {
+        JsonObject o = states.createNestedObject();
+        o["id"] = st.nodeId;
+        o["friendly"] = st.friendly;
+        o["ts"] = st.tsMs;
+        o["raw"] = st.data.as<JsonObject>();
+      }
+      JsonArray keysArr = slim.createNestedArray("keys");
+      for (auto &rk : g_remoteKeys)
+      {
+        JsonObject o = keysArr.createNestedObject();
+        o["id"] = rk.nodeId;
+        if (rk.data.containsKey("sid")) o["sid"] = rk.data["sid"];
+        o["friendly"] = rk.friendly;
+        o["ts"] = rk.tsMs;
+        o["raw"] = rk.data.as<JsonObject>();
+      }
       JsonObject o = keysArr.createNestedObject();
       o["id"] = MeshNet_GetLocalMacStr();
       o["sid"] = MeshNet_GetLocalNodeId();
@@ -1205,7 +1243,12 @@ void HtmlFunctions()
       DynamicJsonDocument tmp(4096);
       if (deserializeJson(tmp, buildKeysSnapshotJson()) == DeserializationError::Ok)
         o["raw"] = tmp.as<JsonObject>();
+
+      String out; serializeJson(slim, out);
+      req->send(200, "application/json", out);
+      return;
     }
+
     String out; serializeJson(doc, out);
     req->send(200, "application/json", out); });
 

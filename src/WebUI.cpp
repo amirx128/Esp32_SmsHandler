@@ -564,19 +564,28 @@ async function loadMeshState(){
   }
   // Apply remote keys if selected
   let applied = false;
+  const target = (currentNodeId || '').toUpperCase();
   if (currentNodeId){
     // If requesting self, fall back to local keys immediately
     const me = data.nodes.find(n => n.local);
-    const isSelf = me && (currentNodeId === me.id || currentNodeId === me.mac || currentNodeId === (me.friendly||me.id));
+    const isSelf = me && (
+      target === (me.id||'').toUpperCase() ||
+      target === (me.mac||'').toUpperCase() ||
+      target === (me.friendly||me.id||'').toUpperCase()
+    );
     if (isSelf){
       await loadKeys();
       applied = true;
     }else{
       const rk = (data.keys||[]).find(k =>
-        k.id === currentNodeId ||
-        k.sid === currentNodeId ||
-        k.friendly === currentNodeId ||
-        (k.raw && (k.raw.sid === currentNodeId || k.raw.id === currentNodeId || k.raw.friendly === currentNodeId))
+        target === (k.id||'').toUpperCase() ||
+        target === (k.sid||'').toUpperCase() ||
+        target === (k.friendly||'').toUpperCase() ||
+        (k.raw && (
+          target === (k.raw.sid||'').toUpperCase() ||
+          target === (k.raw.id||'').toUpperCase() ||
+          target === (k.raw.friendly||'').toUpperCase()
+        ))
       );
       if (rk && rk.raw && rk.raw.keys){
         window.keys = [];
@@ -592,10 +601,14 @@ async function loadMeshState(){
   }
   if (!applied && !window.keys){
     const rk = (data.keys||[]).find(k =>
-      k.id === currentNodeId ||
-      k.sid === currentNodeId ||
-      k.friendly === currentNodeId ||
-      (k.raw && (k.raw.sid === currentNodeId || k.raw.id === currentNodeId || k.raw.friendly === currentNodeId))
+      target === (k.id||'').toUpperCase() ||
+      target === (k.sid||'').toUpperCase() ||
+      target === (k.friendly||'').toUpperCase() ||
+      (k.raw && (
+        target === (k.raw.sid||'').toUpperCase() ||
+        target === (k.raw.id||'').toUpperCase() ||
+        target === (k.raw.friendly||'').toUpperCase()
+      ))
     );
     if (rk && rk.raw && rk.raw.keys){
       window.keys = [];

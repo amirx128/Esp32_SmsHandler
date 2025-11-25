@@ -155,6 +155,7 @@ void handleMeshEvent(const MeshEventInfo &info)
   }
   if (typeUpper == "STATE_REQ")
   {
+    logf(1, "[MESH] STATE_REQ from %s target=%s\n", labeledName.c_str(), payloadTrim.c_str());
     // payload carries target nodeId
     String target = payloadTrim;
     target.trim();
@@ -182,6 +183,7 @@ void handleMeshEvent(const MeshEventInfo &info)
   }
   if (typeUpper == "STATE_RES")
   {
+    logf(1, "[MESH] STATE_RES from %s len=%u\n", labeledName.c_str(), (unsigned)info.payload.length());
     // payload is JSON snapshot
     DynamicJsonDocument doc(512);
     if (deserializeJson(doc, info.payload) == DeserializationError::Ok)
@@ -214,6 +216,7 @@ void handleMeshEvent(const MeshEventInfo &info)
   }
   if (typeUpper == "KEYS_REQ")
   {
+    logf(1, "[MESH] KEYS_REQ from %s target=%s\n", labeledName.c_str(), payloadTrim.c_str());
     String target = payloadTrim;
     target.trim();
     if (target.length() == 0 || target == MeshNet_GetLocalNodeId() || target == MeshNet_GetLocalFriendly())
@@ -225,6 +228,7 @@ void handleMeshEvent(const MeshEventInfo &info)
   }
   if (typeUpper == "KEYS_RES")
   {
+    logf(1, "[MESH] KEYS_RES from %s len=%u\n", labeledName.c_str(), (unsigned)info.payload.length());
     DynamicJsonDocument doc(4096);
     if (deserializeJson(doc, info.payload) == DeserializationError::Ok)
     {
@@ -256,6 +260,7 @@ void handleMeshEvent(const MeshEventInfo &info)
   }
   if (typeUpper == "CFG_SET")
   {
+    logf(1, "[MESH] CFG_SET from %s payload=%s\n", labeledName.c_str(), info.payload.c_str());
     DynamicJsonDocument doc(256);
     if (deserializeJson(doc, info.payload) == DeserializationError::Ok)
     {
@@ -285,6 +290,7 @@ void handleMeshEvent(const MeshEventInfo &info)
   }
   if (typeUpper == "CFG_ACK")
   {
+    logf(1, "[MESH] CFG_ACK from %s payload=%s\n", labeledName.c_str(), info.payload.c_str());
     DynamicJsonDocument doc(256);
     if (deserializeJson(doc, info.payload) == DeserializationError::Ok)
     {

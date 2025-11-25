@@ -356,6 +356,10 @@ function render(){
   const g = $('grid');
   if (!g){ console.warn('         #grid                !'); return; }
   g.innerHTML = '';
+  if (!window.keys || !window.keys.length){
+    g.innerHTML = '<p style="text-align:center;color:#aaa;">No keys loaded. Fetch a node or reload.</p>';
+    return;
+  }
   window.keys.forEach(k => {
     const div = document.createElement('div');
     div.className = 'key-card' + (k.isSystem?' system':'');
@@ -631,6 +635,9 @@ function openMeshModal(nodeId){
 async function requestState(nodeId){
   currentNodeId = nodeId;
   currentNodeName = nodeId;
+  closeModal('nodesModal');
+  window.keys = [];
+  render();
   const banner = $('nodeBanner');
   if (banner){
     banner.classList.add('remote-active');

@@ -573,6 +573,11 @@ async function loadMeshState(){
         rk.raw.keys.forEach(k => window.keys.push(k));
         applied = true;
       }
+      else if (rk && rk.raw && rk.raw.p === 0 && rk.raw.total){ // partial page arrived
+        window.keys = [];
+        if (rk.raw.keys) rk.raw.keys.forEach(k => window.keys.push(k));
+        applied = true;
+      }
     }
   }
   if (!applied && !window.keys){

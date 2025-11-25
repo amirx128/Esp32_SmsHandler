@@ -72,7 +72,7 @@ struct EventPayload
   uint16_t reserved;
   uint64_t timestampMs;
   char     type[16];
-  char     payload[64];
+  char     payload[220];
 } __attribute__((packed));
 
 struct AckPayload

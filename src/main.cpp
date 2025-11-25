@@ -33,11 +33,16 @@ void ApplyClockFromMs(uint64_t timestampMs, bool broadcastMesh);
 String formatTimestampReadable(uint64_t timestampMs);
 bool IsValidEpoch(uint64_t ms);
 String MeshNet_GetLocalFriendly();
+struct ConfigKey;
 uint64_t DeviceNowMs();
 extern const uint8_t kTimeSyncTtl;
 extern String validateKey(const String &key, const String &value);
 String buildKeysSnapshotJson();
+String buildKeysPageJson(int startIndex);
 extern Preferences prefs;
+extern ConfigKey defaultKeys[];
+extern int numKeys;
+const uint8_t kKeysPerPage = 3; // keep mesh payload small
 
 // Forward declare public state vars used in mesh state sharing
 extern bool public_PirEnabled;
@@ -223,8 +228,11 @@ void handleMeshEvent(const MeshEventInfo &info)
     String localMacFull = MeshNet_GetLocalMacStr();
     if (target.length() == 0 || target == MeshNet_GetLocalNodeId() || target == MeshNet_GetLocalFriendly() || target == localMacFull)
     {
-      String out = buildKeysSnapshotJson();
-      MeshNet_RecordNetworkEvent("KEYS_RES", out, false, false, kTimeSyncTtl, DeviceNowMs());
+      for (int start = 0; start < numKeys; start += kKeysPerPage)
+      {
+        String out = buildKeysPageJson(start);
+        MeshNet_RecordNetworkEvent("KEYS_RES", out, false, false, kTimeSyncTtl, DeviceNowMs());
+      }
     }
     return;
   }
@@ -235,6 +243,7 @@ void handleMeshEvent(const MeshEventInfo &info)
     if (deserializeJson(doc, info.payload) == DeserializationError::Ok)
     {
       String nid = doc.containsKey("id") ? String((const char *)doc["id"]) : originName;
+      int pageStart = doc["p"] | 0;
       bool found = false;
       for (auto &rk : g_remoteKeys)
       {
@@ -244,6 +253,18 @@ void handleMeshEvent(const MeshEventInfo &info)
           rk.tsMs = info.timestampMs;
           rk.nodeId = nid;
           rk.friendly = doc.containsKey("friendly") ? String((const char *)doc["friendly"]) : originName;
+          // Merge paged keys: if p==0 reset, then append keys
+          if (doc.containsKey("keys"))
+          {
+            if (pageStart == 0 || !rk.data.containsKey("keys"))
+              rk.data["keys"] = doc["keys"];
+            else
+            {
+              JsonArray dest = rk.data["keys"].as<JsonArray>();
+              for (JsonObject k : doc["keys"].as<JsonArray>())
+                dest.add(k);
+            }
+          }
           found = true;
           break;
         }
@@ -580,6 +601,7 @@ String deviceName;
 
 struct ConfigKey
 {
+  uint8_t id;
   String key;
   String title; // caption (fa-IR)
   String type; // string, int, bool, dropdown, mobile
@@ -592,47 +614,47 @@ struct ConfigKey
 
 //                           :                                                    +                                    
 ConfigKey defaultKeys[] = {
-    {"wifi_Ssid_Name",   "??? ???? ?? (SSID)",     "string", ssidNameDefault,      "2",  "32",  "",            false},
-    {"Ssid_Password",    "??? ???? ??",                  "string", ssidPasswordDefault,  "8",  "32",  "",            false},
+    {0, "wifi_Ssid_Name",   "??? ???? ?? (SSID)",     "string", ssidNameDefault,      "2",  "32",  "",            false},
+    {1, "Ssid_Password",    "??? ???? ??",                  "string", ssidPasswordDefault,  "8",  "32",  "",            false},
 
-    {"deviceName",       "                   ",                "string", "            ",             "3",  "20",  "",            false},
+    {2, "deviceName",       "                   ",                "string", "            ",             "3",  "20",  "",            false},
 
     //                             :
-    {"SystemEnabled",    "                            ",           "bool",   "true",               "",   "",    "true,false", true},
+    {3, "SystemEnabled",    "                            ",           "bool",   "true",               "",   "",    "true,false", true},
     #if HAS_PIR
-{"PirEnabled",       "                             PIR",       "bool",   "true",               "",   "",    "true,false", false},
+{4,"PirEnabled",       "                             PIR",       "bool",   "true",               "",   "",    "true,false", false},
     #endif
 #if HAS_VIB
-{"VibEnabled",       "                                     ",      "bool",   "true",               "",   "",    "true,false", false},
+{5,"VibEnabled",       "                                     ",      "bool",   "true",               "",   "",    "true,false", false},
     #endif
-{"LedEnabled",       "                  LED",             "bool",   "true",               "",   "",    "true,false", false},
-    {"BuzzerEnabled",    "                          ",            "bool",   "false",              "",   "",    "true,false", false},
-    {"SmsAlertEnabled",  "                                        ",     "bool",   "true",               "",   "",    "true,false", false},
-    {"SmsTxEnabled",     "                  SMS",             "bool",   "true",               "",   "",    "true,false", false},
-    {"WifiEnabled",      "                  WiFi (SoftAP)",   "bool",   "true",               "",   "",    "true,false", false},
-    {"mesh_name",        "Mesh Name",                        "string", meshNameDefault,       "3",  "32",  "",            true},
-    {"mesh_pass",        "Mesh Password",                    "string", meshPasswordDefault,   "8",  "32",  "",            true},
+{6,"LedEnabled",       "                  LED",             "bool",   "true",               "",   "",    "true,false", false},
+    {7,"BuzzerEnabled",    "                          ",            "bool",   "false",              "",   "",    "true,false", false},
+    {8,"SmsAlertEnabled",  "                                        ",     "bool",   "true",               "",   "",    "true,false", false},
+    {9,"SmsTxEnabled",     "                  SMS",             "bool",   "true",               "",   "",    "true,false", false},
+    {10,"WifiEnabled",      "                  WiFi (SoftAP)",   "bool",   "true",               "",   "",    "true,false", false},
+    {11,"mesh_name",        "Mesh Name",                        "string", meshNameDefault,       "3",  "32",  "",            true},
+    {12,"mesh_pass",        "Mesh Password",                    "string", meshPasswordDefault,   "8",  "32",  "",            true},
 
     //                   (MQ)
     #if HAS_GAS
-{"GasEnabled",       "                                    (MQ)",  "bool",   "true",               "",   "",    "true,false", false},
-    {"GasMin",           "                               ",         "int",    "300",               "0",  "4095","",            false},
-    {"GasMax",           "                               ",         "int",    "2500",              "0",  "4095","",            false},
+{13,"GasEnabled",       "                                    (MQ)",  "bool",   "true",               "",   "",    "true,false", false},
+    {14,"GasMin",           "                               ",         "int",    "300",               "0",  "4095","",            false},
+    {15,"GasMax",           "                               ",         "int",    "2500",              "0",  "4095","",            false},
 
     #endif
     #if HAS_DHT
-    {"DhtEnabled",       "DHT Enabled",                  "bool",   "true",               "",   "",    "true,false",  false},
-    {"TempMin",          "Temp Min (C)",                 "int",    "10",                "-40","125", "",            false},
-    {"TempMax",          "Temp Max (C)",                 "int",    "40",                "-40","125", "",            false},
-    {"HumMin",           "Humidity Min (%)",           "int",    "20",                "0","100", "",            false},
-    {"HumMax",           "Humidity Max (%)",           "int",    "80",                "0","100", "",            false},
+    {16,"DhtEnabled",       "DHT Enabled",                  "bool",   "true",               "",   "",    "true,false",  false},
+    {17,"TempMin",          "Temp Min (C)",                 "int",    "10",                "-40","125", "",            false},
+    {18,"TempMax",          "Temp Max (C)",                 "int",    "40",                "-40","125", "",            false},
+    {19,"HumMin",           "Humidity Min (%)",           "int",    "20",                "0","100", "",            false},
+    {20,"HumMax",           "Humidity Max (%)",           "int",    "80",                "0","100", "",            false},
     #endif
-{"OwnerMobile",      "                   ",                "mobile", "",                   "10", "12",  "",            false},
-    {"alternetMobile",   "                         ",            "mobile", "",                   "10", "10",  "",            false},
-    {"AlternetMobiles",  "                                   (*      )",  "string", "",                   "10", "100", "",            false},
+{21,"OwnerMobile",      "                   ",                "mobile", "",                   "10", "12",  "",            false},
+    {22,"alternetMobile",   "                         ",            "mobile", "",                   "10", "10",  "",            false},
+    {23,"AlternetMobiles",  "                                   (*      )",  "string", "",                   "10", "100", "",            false},
 };
 
-const int numKeys = sizeof(defaultKeys) / sizeof(defaultKeys[0]);
+int numKeys = sizeof(defaultKeys) / sizeof(defaultKeys[0]);
 
 // ===================== HTML =====================
 
@@ -731,6 +753,36 @@ String validateKey(const String &key, const String &value)
   return "                       ";
 }
 
+// Build KEYS_RES page starting from index 'start'
+String buildKeysPageJson(int startIndex)
+{
+  DynamicJsonDocument doc(1024);
+  JsonArray arr = doc.createNestedArray("keys");
+  int count = 0;
+  for (int i = startIndex; i < numKeys && count < kKeysPerPage; i++, count++)
+  {
+    JsonObject obj = arr.createNestedObject();
+    obj["id"] = defaultKeys[i].id;
+    obj["key"] = defaultKeys[i].key;
+    obj["title"] = defaultKeys[i].title;
+    obj["type"] = defaultKeys[i].type;
+    obj["value"] = prefs.getString(defaultKeys[i].key.c_str(), defaultKeys[i].defaultVal);
+    obj["min"] = defaultKeys[i].min;
+    obj["max"] = defaultKeys[i].max;
+    obj["options"] = defaultKeys[i].options;
+    obj["isSystem"] = defaultKeys[i].isSystem;
+    obj["idx"] = i;
+  }
+  doc["friendly"] = MeshNet_GetLocalFriendly();
+  doc["id"] = MeshNet_GetLocalNodeId();
+  doc["mac"] = MeshNet_GetLocalMacStr();
+  doc["p"] = startIndex;
+  doc["total"] = numKeys;
+  String out;
+  serializeJson(doc, out);
+  return out;
+}
+
 String buildKeysSnapshotJson()
 {
   DynamicJsonDocument doc(4096);
@@ -738,6 +790,7 @@ String buildKeysSnapshotJson()
   for (int i = 0; i < numKeys; i++)
   {
     JsonObject obj = arr.createNestedObject();
+    obj["id"] = defaultKeys[i].id;
     obj["key"] = defaultKeys[i].key;
     obj["title"] = defaultKeys[i].title;
     obj["type"] = defaultKeys[i].type;

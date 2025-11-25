@@ -5,6 +5,7 @@
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include <time.h>
+#include <stdlib.h>
 #include <vector>
 #include "DeviceConfig.h"
 #include "MeshlessNetwork.h"
@@ -28,6 +29,9 @@ bool enqueueSms(String number, String text, int priority);
 NodeCapabilities buildLocalCaps();
 void handleMeshEvent(const MeshEventInfo &info);
 void EnsurePreferencesFresh();
+void ApplyClockFromMs(uint64_t timestampMs, bool broadcastMesh);
+String formatTimestampReadable(uint64_t timestampMs);
+bool IsValidEpoch(uint64_t ms);
 
 String formatMacFull(uint64_t mac)
 {
@@ -95,6 +99,22 @@ void handleMeshEvent(const MeshEventInfo &info)
        (int)info.requiresSiren,
        (unsigned)info.ttl,
        (unsigned long long)info.timestampMs);
+  String typeUpper = info.type;
+  typeUpper.trim();
+  typeUpper.toUpperCase();
+  if (typeUpper == "TIME")
+  {
+    uint64_t remoteMs = strtoull(info.payload.c_str(), nullptr, 10);
+    if (IsValidEpoch(remoteMs))
+    {
+      ApplyClockFromMs(remoteMs, false);
+      logf(1, "[MESH] Applied time sync from %s (%s) -> %s\n",
+           labeledName.c_str(),
+           macFull.c_str(),
+           formatTimestampReadable(remoteMs).c_str());
+    }
+    return;
+  }
   if (payloadTrim.startsWith("GAS 0"))
   {
     logf(1, "[MESH] Ignoring gas alarm from %s (%s) due to missing sensor indication.\n",
@@ -214,6 +234,8 @@ uint64_t g_lastSyncUnixMs = 0; // ms                         sync
 uint32_t g_lastSyncMillis = 0; // millis()            sync
 uint64_t g_deviceNowMs = 0;    //                               
 uint32_t g_clockTickMs = 0;
+const uint8_t kTimeSyncTtl = 8;
+const uint64_t kMinValidEpochMs = 1735689600000ULL; // 2025-01-01 UTC
 
 // Helper to format ms->readable string (keeps +12600 & localtime logic)
 String formatTimestampReadable(uint64_t timestampMs)
@@ -229,6 +251,16 @@ String nowTimeReadable()
 {
   uint64_t nowMs = g_lastSyncUnixMs + (uint64_t)(millis() - g_lastSyncMillis);
   return formatTimestampReadable(nowMs);
+}
+
+uint64_t DeviceNowMs()
+{
+  return g_lastSyncUnixMs + (uint64_t)(millis() - g_lastSyncMillis);
+}
+
+inline bool IsValidEpoch(uint64_t ms)
+{
+  return ms >= kMinValidEpochMs;
 }
 
 void UpdateDeviceClockIfNeeded()
@@ -308,6 +340,23 @@ String smsSendRespBuf = "";
 AsyncWebServer server(80);
 Preferences prefs;
 Preferences prefsClock;
+
+void ApplyClockFromMs(uint64_t timestampMs, bool broadcastMesh)
+{
+  prefs.putULong("epochStartTime", (unsigned long)timestampMs);
+  epochStartTime = (unsigned long)timestampMs;
+
+  g_lastSyncUnixMs = timestampMs;
+  g_lastSyncMillis = millis();
+  g_deviceNowMs = g_lastSyncUnixMs;
+
+  printTimestampReadable(timestampMs);
+
+  if (broadcastMesh)
+  {
+    MeshNet_RecordNetworkEvent("TIME", String(timestampMs), false, false, kTimeSyncTtl, timestampMs);
+  }
+}
 
 // ---            /                       ---
 String ssidNameDefault = "ElixHome";
@@ -683,14 +732,7 @@ void HtmlFunctions()
     unsigned long long timestamp = obj["timestamp"]; // ms
     Serial.print("browser time "); Serial.println((unsigned long long)timestamp);
 
-    prefs.putULong("epochStartTime", (unsigned long)timestamp);
-    epochStartTime = (unsigned long)timestamp;
-
-    g_lastSyncUnixMs = timestamp;
-    g_lastSyncMillis = millis();
-    g_deviceNowMs    = g_lastSyncUnixMs;
-
-    printTimestampReadable(timestamp);
+    ApplyClockFromMs(timestamp, true);
     request->send(200, "application/json", "{\"success\":true}"); }));
 
   server.on("/api/time", HTTP_GET, [](AsyncWebServerRequest *request)
@@ -1575,13 +1617,8 @@ void compileSms(String smsText, String num)
     long secsUtc = secsLocal - 12600L; // UTC = IRST - 3:30
     uint64_t ms = (uint64_t)secsUtc * 1000ULL;
 
-    // Set device clock
-    prefs.putULong("epochStartTime", (unsigned long)ms);
-    epochStartTime = (unsigned long)ms;
-    g_lastSyncUnixMs = ms;
-    g_lastSyncMillis = millis();
-    g_deviceNowMs    = g_lastSyncUnixMs;
-    printTimestampReadable(ms);
+    // Set device clock + broadcast to mesh
+    ApplyClockFromMs(ms, true);
 
     //                    
     enqueueSms(num, String("time set @ ") + formatTimestampReadable(ms), 1);
@@ -2587,6 +2624,8 @@ void setup()
                 ssidName.c_str());
   StartSoftAP();
   MeshNet_Init(handleMeshEvent);
+  MeshNet_SetTimeProvider(DeviceNowMs);
+  MeshNet_SetClockSetter(ApplyClockFromMs);
   MeshNet_UpdateLocalCapabilities(buildLocalCaps());
   HtmlFunctions();
   SetupSim();

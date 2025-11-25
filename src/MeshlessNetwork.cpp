@@ -24,6 +24,7 @@ constexpr size_t   kPersistMaxEvents   = 20;
 constexpr uint8_t  kAckTtl             = 5;
 constexpr uint8_t  kFlagsRequiresSms   = 0x01;
 constexpr uint8_t  kFlagsRequiresSiren = 0x02;
+constexpr uint64_t kMinValidEpochMs    = 1735689600000ULL; // 2025-01-01 UTC
 
 enum PacketKind : uint8_t
 {
@@ -44,6 +45,17 @@ struct MeshPacketHeader
 } __attribute__((packed));
 
 struct HelloPayload
+{
+  char     nodeId[8];
+  char     friendly[16];
+  char     ssid[32];
+  uint32_t authHash;
+  uint16_t capsMask;
+  uint8_t  sensorCount;
+  uint64_t timeMs;
+} __attribute__((packed));
+
+struct HelloPayloadV1
 {
   char     nodeId[8];
   char     friendly[16];
@@ -78,6 +90,7 @@ struct NodeEntry
   uint32_t         authHash = 0;
   NodeCapabilities caps;
   uint32_t         lastSeenMs = 0;
+  uint64_t         lastTimeMs = 0;
   bool             online = false;
   bool             isLocal = false;
   bool             authorized = false;
@@ -151,6 +164,8 @@ bool                       g_capsDirty = true;
 const uint8_t              kBroadcastAddr[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 Preferences                g_histPrefs;
 uint32_t                   g_localAuthHash = 0;
+MeshTimeProvider           g_timeProvider = nullptr;
+MeshClockSetter            g_clockSetter = nullptr;
 
 // Forward declarations
 void persistHistory();
@@ -243,6 +258,7 @@ void updateLocalNodeEntry()
   me.ssid = g_localSsid;
   me.caps = g_localCaps;
   me.authHash = g_localAuthHash;
+  me.lastTimeMs = g_timeProvider ? g_timeProvider() : 0;
   me.authorized = true;
 }
 
@@ -288,6 +304,11 @@ void copyString(char *dst, size_t len, const String &src)
   dst[toCopy] = '\0';
   if (toCopy + 1 < len)
     memset(dst + toCopy + 1, 0, len - toCopy - 1);
+}
+
+inline bool isTimeValid(uint64_t ms)
+{
+  return ms >= kMinValidEpochMs;
 }
 
 String describeNode(uint64_t mac)
@@ -411,6 +432,7 @@ void broadcastHello()
   payload.authHash = g_localAuthHash;
   payload.capsMask = encodeCaps(g_localCaps);
   payload.sensorCount = g_localCaps.sensorCount;
+   payload.timeMs = g_timeProvider ? g_timeProvider() : 0;
   sendPacket(PKT_HELLO, 0, 0, g_localMac, reinterpret_cast<uint8_t *>(&payload), sizeof(payload));
   g_capsDirty = false;
   g_lastHelloMs = millis();
@@ -527,6 +549,7 @@ void handleHello(const MeshPacketHeader &header, const HelloPayload &payload)
   node.authHash = payload.authHash;
   node.authorized = true;
   node.authError = false;
+  node.lastTimeMs = payload.timeMs;
   node.caps = decodeCaps(payload.capsMask, payload.sensorCount);
   node.online = true;
   node.lastSeenMs = millis();
@@ -539,6 +562,18 @@ void handleHello(const MeshPacketHeader &header, const HelloPayload &payload)
          node.ssid.c_str(),
          capsToString(node.caps).c_str(),
          node.caps.sensorCount);
+  }
+
+  uint64_t remoteTime = payload.timeMs;
+  uint64_t localTime = g_timeProvider ? g_timeProvider() : 0;
+  bool remoteValid = isTimeValid(remoteTime);
+  bool localValid = isTimeValid(localTime);
+  if (g_clockSetter && remoteValid && !localValid)
+  {
+    logf(1, "[MESH] Auto time sync from HELLO of %s -> %llu\n",
+         node.nodeId.c_str(),
+         (unsigned long long)remoteTime);
+    g_clockSetter(remoteTime, true);
   }
 }
 
@@ -557,6 +592,11 @@ void handleEvent(const MeshPacketHeader &header, const EventPayload &payload)
   NodeEntry &node = *nodePtr;
   node.online = true;
   node.lastSeenMs = millis();
+  node.lastTimeMs = payload.timestampMs;
+
+  uint64_t ts = payload.timestampMs;
+  if (!isTimeValid(ts) && g_timeProvider)
+    ts = g_timeProvider();
 
   HistoryEntry history;
   history.messageId = header.messageId;
@@ -567,7 +607,7 @@ void handleEvent(const MeshPacketHeader &header, const EventPayload &payload)
   history.payload = payload.payload;
   history.requiresSms = (payload.flags & kFlagsRequiresSms) != 0;
   history.requiresSiren = (payload.flags & kFlagsRequiresSiren) != 0;
-  history.timestampMs = payload.timestampMs;
+  history.timestampMs = ts;
   history.initialTtl = payload.initialTtl;
   history.delivered = false;
   g_history.push_back(history);
@@ -635,6 +675,15 @@ void onEspNowRecv(const uint8_t *mac, const uint8_t *data, int len)
     {
       HelloPayload hello;
       memcpy(&hello, payload, sizeof(hello));
+      handleHello(header, hello);
+    }
+    else if (payloadLen == static_cast<int>(sizeof(HelloPayloadV1)))
+    {
+      HelloPayloadV1 v1;
+      memcpy(&v1, payload, sizeof(v1));
+      HelloPayload hello = {};
+      memcpy(&hello, &v1, sizeof(v1));
+      hello.timeMs = 0;
       handleHello(header, hello);
     }
     break;
@@ -771,6 +820,17 @@ void MeshNet_UpdateLocalCapabilities(const NodeCapabilities &caps)
   g_capsDirty = true;
 }
 
+void MeshNet_SetTimeProvider(MeshTimeProvider provider)
+{
+  g_timeProvider = provider;
+  updateLocalNodeEntry();
+}
+
+void MeshNet_SetClockSetter(MeshClockSetter setter)
+{
+  g_clockSetter = setter;
+}
+
 void MeshNet_Init(MeshEventHandler handler)
 {
   g_handler = handler;
@@ -879,6 +939,10 @@ String MeshNet_RecordNetworkEvent(const String &type,
   if (!g_initialized || !g_espNowReady)
     return "";
 
+  uint64_t ts = timestampMs;
+  if (!isTimeValid(ts) && g_timeProvider)
+    ts = g_timeProvider();
+
   PendingEvent evt;
   evt.messageId = ++g_eventCounter;
   evt.originMac = g_localMac;
@@ -890,7 +954,7 @@ String MeshNet_RecordNetworkEvent(const String &type,
   evt.initialTtl = ttl;
   evt.lastSendMs = 0;
   evt.createdMs = millis();
-  evt.timestampMs = timestampMs;
+  evt.timestampMs = ts;
   evt.delivered = false;
   snapshotExpectedNodes(evt.expected);
   evt.acked.push_back(g_localMac);
@@ -906,7 +970,7 @@ String MeshNet_RecordNetworkEvent(const String &type,
   history.payload = payload;
   history.requiresSms = requiresSms;
   history.requiresSiren = requiresSiren;
-  history.timestampMs = timestampMs;
+  history.timestampMs = ts;
   history.initialTtl = ttl;
   history.expectedAckCount = evt.expected.size();
   history.delivered = false;
@@ -937,6 +1001,7 @@ void MeshNet_SerializeNodes(JsonArray arr)
     obj["online"] = node.online;
     obj["ageMs"] = node.lastSeenMs ? (uint32_t)(now - node.lastSeenMs) : 0;
     obj["authError"] = node.authError;
+    obj["timeMs"] = node.lastTimeMs;
     JsonObject caps = obj.createNestedObject("caps");
     caps["sim"] = node.caps.hasSim;
     caps["smsAlert"] = node.caps.smsAlertEnabled;

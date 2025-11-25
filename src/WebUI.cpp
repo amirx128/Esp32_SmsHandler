@@ -117,8 +117,8 @@ const char index_html[] PROGMEM = R"rawliteral(
     <h3>Mesh Nodes</h3>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Name</th><th>Node ID</th><th>MAC</th><th>SSID</th><th>Status</th><th>Actions</th></tr></thead>
-        <tbody id="mesh-nodes-body"><tr><td colspan="6" style="text-align:center;color:#999;">Loading...</td></tr></tbody>
+        <thead><tr><th>Name</th><th>Node ID</th><th>MAC</th><th>SSID</th><th>Status</th><th>Time</th><th>Actions</th></tr></thead>
+        <tbody id="mesh-nodes-body"><tr><td colspan="7" style="text-align:center;color:#999;">Loading...</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -449,6 +449,7 @@ function syncTime(){
 
 function fmtTs(ms){
   try{
+    if (!ms || ms < 1000000000000) return '-';
     const d = new Date(ms);
     return d.toLocaleString('en-US');
   }catch(e){ return ms; }
@@ -532,7 +533,7 @@ async function loadMeshState(){
   if (tb){
     tb.innerHTML = '';
     if (!data.nodes.length){
-      tb.innerHTML = `<tr><td colspan="6" style="text-align:center;color:#999;">No nodes detected</td></tr>`;
+      tb.innerHTML = `<tr><td colspan="7" style="text-align:center;color:#999;">No nodes detected</td></tr>`;
     }else{
       data.nodes.forEach(node => {
         const friendly = node.friendly || node.id;
@@ -540,6 +541,7 @@ async function loadMeshState(){
         let status = node.online ? 'online' : 'offline';
         let cls = node.online ? 's' : 'f';
         if (node.authError) { status = 'auth error'; cls = 'f'; }
+        const nodeTime = (node.timeMs && node.timeMs > 0) ? fmtTs(node.timeMs) : '-';
         const tr = document.createElement('tr');
         tr.innerHTML = `
           <td>${friendly}${me}</td>
@@ -547,6 +549,7 @@ async function loadMeshState(){
           <td class="mono">${node.mac || '-'}</td>
           <td class="mono">${node.ssid || '-'}</td>
           <td><span class="badge ${cls}">${status}</span></td>
+          <td class="mono">${nodeTime}</td>
           <td><button onclick="openMeshModal('${node.id}')">View Messages</button></td>`;
         tb.appendChild(tr);
       });

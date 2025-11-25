@@ -32,11 +32,15 @@ struct MeshEventInfo
 };
 
 using MeshEventHandler = void (*)(const MeshEventInfo &info);
+using MeshTimeProvider = uint64_t (*)();
+using MeshClockSetter  = void (*)(uint64_t timestampMs, bool broadcastMesh);
 
 void    MeshNet_SetFriendlyName(const String &name);
 void    MeshNet_SetLocalSsid(const String &ssid);
 void    MeshNet_SetAuth(const String &ssid, const String &password);
 void    MeshNet_UpdateLocalCapabilities(const NodeCapabilities &caps);
+void    MeshNet_SetTimeProvider(MeshTimeProvider provider);
+void    MeshNet_SetClockSetter(MeshClockSetter setter);
 void    MeshNet_Init(MeshEventHandler handler);
 void    MeshNet_Tick();
 String  MeshNet_GetShortMac();

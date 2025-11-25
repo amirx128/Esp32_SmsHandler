@@ -35,6 +35,9 @@ bool IsValidEpoch(uint64_t ms);
 String MeshNet_GetLocalFriendly();
 uint64_t DeviceNowMs();
 extern const uint8_t kTimeSyncTtl;
+extern String validateKey(const String &key, const String &value);
+String buildKeysSnapshotJson();
+extern Preferences prefs;
 
 // Forward declare public state vars used in mesh state sharing
 extern bool public_PirEnabled;
@@ -46,6 +49,7 @@ extern int  public_GasValue;
 extern float public_TempValue;
 extern float public_HumValue;
 #endif
+extern String MeshNet_GetLocalMacStr();
 
 String formatMacFull(uint64_t mac)
 {
@@ -94,6 +98,16 @@ struct RemoteState
   RemoteState() : data(512) {}
 };
 std::vector<RemoteState> g_remoteStates;
+
+struct RemoteKeys
+{
+  String nodeId;
+  String friendly;
+  uint64_t tsMs = 0;
+  DynamicJsonDocument data;
+  RemoteKeys() : data(4096) {}
+};
+std::vector<RemoteKeys> g_remoteKeys;
 
 // ---- Time formatting (UNCHANGED: +12600 and localtime) ----
 void printTimestampReadable(uint64_t timestampMs)
@@ -195,6 +209,105 @@ void handleMeshEvent(const MeshEventInfo &info)
         st.data = doc;
         g_remoteStates.push_back(st);
       }
+    }
+    return;
+  }
+  if (typeUpper == "KEYS_REQ")
+  {
+    String target = payloadTrim;
+    target.trim();
+    if (target.length() == 0 || target == MeshNet_GetLocalNodeId() || target == MeshNet_GetLocalFriendly())
+    {
+      String out = buildKeysSnapshotJson();
+      MeshNet_RecordNetworkEvent("KEYS_RES", out, false, false, kTimeSyncTtl, DeviceNowMs());
+    }
+    return;
+  }
+  if (typeUpper == "KEYS_RES")
+  {
+    DynamicJsonDocument doc(4096);
+    if (deserializeJson(doc, info.payload) == DeserializationError::Ok)
+    {
+      String nid = doc.containsKey("id") ? String((const char *)doc["id"]) : originName;
+      bool found = false;
+      for (auto &rk : g_remoteKeys)
+      {
+        if (rk.nodeId == nid)
+        {
+          rk.data = doc;
+          rk.tsMs = info.timestampMs;
+          rk.nodeId = nid;
+          rk.friendly = doc.containsKey("friendly") ? String((const char *)doc["friendly"]) : originName;
+          found = true;
+          break;
+        }
+      }
+      if (!found)
+      {
+        RemoteKeys rk;
+        rk.nodeId = nid;
+        rk.friendly = doc.containsKey("friendly") ? String((const char *)doc["friendly"]) : originName;
+        rk.tsMs = info.timestampMs;
+        rk.data = doc;
+        g_remoteKeys.push_back(rk);
+      }
+    }
+    return;
+  }
+  if (typeUpper == "CFG_SET")
+  {
+    DynamicJsonDocument doc(256);
+    if (deserializeJson(doc, info.payload) == DeserializationError::Ok)
+    {
+      String target = doc["id"] | "";
+      String key = doc["key"] | "";
+      String val = doc["value"] | "";
+      if (target.length() == 0 || target == MeshNet_GetLocalNodeId() || target == MeshNet_GetLocalFriendly())
+      {
+        String res = validateKey(key, val);
+        bool ok = (res == "1");
+        if (ok)
+        {
+          prefs.putString(key.c_str(), val);
+          SetPublicVariablesFromPrefs();
+        }
+        DynamicJsonDocument ack(256);
+        ack["id"] = target.length() ? target : MeshNet_GetLocalNodeId();
+        ack["key"] = key;
+        ack["ok"] = ok;
+        ack["val"] = val;
+        if (!ok) ack["err"] = res;
+        String out; serializeJson(ack, out);
+        MeshNet_RecordNetworkEvent("CFG_ACK", out, false, false, kTimeSyncTtl, DeviceNowMs());
+      }
+    }
+    return;
+  }
+  if (typeUpper == "CFG_ACK")
+  {
+    DynamicJsonDocument doc(256);
+    if (deserializeJson(doc, info.payload) == DeserializationError::Ok)
+    {
+      String nid = doc["id"] | originName;
+      String key = doc["key"] | "";
+      bool ok = doc["ok"] | false;
+      for (auto &rk : g_remoteKeys)
+      {
+        if (rk.nodeId == nid && rk.data.containsKey("keys"))
+        {
+          JsonArray arr = rk.data["keys"].as<JsonArray>();
+          for (JsonObject k : arr)
+          {
+            if (String((const char *)k["key"]) == key)
+            {
+              if (doc.containsKey("val"))
+                k["value"] = (const char *)doc["val"];
+              break;
+            }
+          }
+        }
+      }
+      logf(1, "[CFG_ACK] node=%s key=%s ok=%d\n", nid.c_str(), key.c_str(), (int)ok);
     }
     return;
   }
@@ -609,6 +722,30 @@ String validateKey(const String &key, const String &value)
   return "                       ";
 }
 
+String buildKeysSnapshotJson()
+{
+  DynamicJsonDocument doc(4096);
+  JsonArray arr = doc.createNestedArray("keys");
+  for (int i = 0; i < numKeys; i++)
+  {
+    JsonObject obj = arr.createNestedObject();
+    obj["key"] = defaultKeys[i].key;
+    obj["title"] = defaultKeys[i].title;
+    obj["type"] = defaultKeys[i].type;
+    obj["value"] = prefs.getString(defaultKeys[i].key.c_str(), defaultKeys[i].defaultVal);
+    obj["min"] = defaultKeys[i].min;
+    obj["max"] = defaultKeys[i].max;
+    obj["options"] = defaultKeys[i].options;
+    obj["isSystem"] = defaultKeys[i].isSystem;
+  }
+  doc["friendly"] = MeshNet_GetLocalFriendly();
+  doc["id"] = MeshNet_GetLocalNodeId();
+  doc["mac"] = MeshNet_GetLocalMacStr();
+  String out;
+  serializeJson(doc, out);
+  return out;
+}
+
 // ===================== SMS LOG (Archive 200) =====================
 
 struct SmsArchive
@@ -961,6 +1098,15 @@ void HtmlFunctions()
       o["ts"] = st.tsMs;
       o["raw"] = st.data.as<JsonObject>();
     }
+    JsonArray keysArr = doc.createNestedArray("keys");
+    for (auto &rk : g_remoteKeys)
+    {
+      JsonObject o = keysArr.createNestedObject();
+      o["id"] = rk.nodeId;
+      o["friendly"] = rk.friendly;
+      o["ts"] = rk.tsMs;
+      o["raw"] = rk.data.as<JsonObject>();
+    }
     String out; serializeJson(doc, out);
     req->send(200, "application/json", out); });
 
@@ -991,6 +1137,45 @@ void HtmlFunctions()
       return;
     }
     MeshNet_RecordNetworkEvent("STATE_REQ", target, false, false, kTimeSyncTtl, DeviceNowMs());
+    DynamicJsonDocument resp(128);
+    resp["success"] = true;
+    String out; serializeJson(resp, out);
+    request->send(200, "application/json", out); }));
+
+  server.addHandler(new AsyncCallbackJsonWebHandler("/api/mesh/requestKeys", [](AsyncWebServerRequest *request, JsonVariant &json)
+                                                    {
+    if (!authenticateWeb(request)) { request->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
+    if (!json.is<JsonObject>()) { request->send(400,"application/json","{\"error\":\"         JSON                      \"}"); return; }
+    String target = json["nodeId"] | "";
+    if (target.length() == 0)
+    {
+      request->send(400,"application/json","{\"error\":\"nodeId required\"}");
+      return;
+    }
+    MeshNet_RecordNetworkEvent("KEYS_REQ", target, false, false, kTimeSyncTtl, DeviceNowMs());
+    DynamicJsonDocument resp(128);
+    resp["success"] = true;
+    String out; serializeJson(resp, out);
+    request->send(200, "application/json", out); }));
+
+  server.addHandler(new AsyncCallbackJsonWebHandler("/api/mesh/saveRemote", [](AsyncWebServerRequest *request, JsonVariant &json)
+                                                    {
+    if (!authenticateWeb(request)) { request->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
+    if (!json.is<JsonObject>()) { request->send(400,"application/json","{\"error\":\"         JSON                      \"}"); return; }
+    String target = json["nodeId"] | "";
+    String key = json["key"] | "";
+    String value = json["value"] | "";
+    if (target.length() == 0 || key.length() == 0)
+    {
+      request->send(400,"application/json","{\"error\":\"nodeId and key required\"}");
+      return;
+    }
+    DynamicJsonDocument doc(256);
+    doc["id"] = target;
+    doc["key"] = key;
+    doc["value"] = value;
+    String payload; serializeJson(doc, payload);
+    MeshNet_RecordNetworkEvent("CFG_SET", payload, false, false, kTimeSyncTtl, DeviceNowMs());
     DynamicJsonDocument resp(128);
     resp["success"] = true;
     String out; serializeJson(resp, out);

@@ -929,6 +929,11 @@ String MeshNet_GetLocalFriendly()
   return g_friendlyName.length() ? g_friendlyName : MeshNet_GetLocalNodeId();
 }
 
+String MeshNet_GetLocalMacStr()
+{
+  return formatMacString(g_localMac);
+}
+
 uint8_t MeshNet_GetMeshChannel()
 {
   return kMeshChannel;

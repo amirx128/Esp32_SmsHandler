@@ -53,5 +53,6 @@ String  MeshNet_RecordNetworkEvent(const String &type,
                                    uint8_t ttl,
                                    uint64_t timestampMs);
 String  MeshNet_GetLocalFriendly();
+String  MeshNet_GetLocalMacStr();
 void    MeshNet_SerializeNodes(JsonArray arr);
 void    MeshNet_SerializeEvents(JsonArray arr);

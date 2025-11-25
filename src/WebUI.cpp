@@ -12,6 +12,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     body { font-family: Tahoma; background:var(--bg); color:var(--text); margin:0; }
     .container { max-width: 1100px; margin: 20px auto; padding: 20px; }
     .card { background:var(--card); border-radius:12px; padding:20px; margin-bottom:20px; box-shadow:0 4px 12px rgba(0,0,0,0.3); }
+    .card.remote-active { box-shadow:0 0 0 3px var(--s) inset,0 4px 12px rgba(0,0,0,0.3); transition: box-shadow .3s ease; }
     h1,h2 { text-align:center; color:var(--p); }
     input, select, button { padding:10px; margin:5px 0; border-radius:8px; width:100%; border:1px solid #555; background:rgba(255,255,255,0.1); color:var(--text); }
     button { background:var(--p); color:#fff; border:none; cursor:pointer; font-weight:bold; }
@@ -52,8 +53,8 @@ const char index_html[] PROGMEM = R"rawliteral(
 </div>
 
 <div id="main" class="container hidden">
-  <div class="card">
-    <h1>Device Settings</h1>
+  <div class="card" id="nodeBanner">
+    <h1 id="deviceTitle">Device Settings <span id="nodeNameLabel" style="font-size:0.7em;color:#ccc;"></span></h1>
     <label>Device Time</label>
     <input type="datetime-local" id="deviceTime" step="1" />
     <div class="btn-row">
@@ -196,6 +197,8 @@ const char index_html[] PROGMEM = R"rawliteral(
 <script>
 let TOKEN = null;
 let meshState = {nodes:[], events:[], states:[]};
+let currentNodeId = null;
+let currentNodeName = null;
 
 function $(id){ return document.getElementById(id); }
 
@@ -284,6 +287,8 @@ async function afterLogin(preloaded){
   setDeviceTimeInput(Date.now());
   await autoSyncClock();
   setInterval(autoSyncClock, 5 * 60 * 1000);
+  currentNodeId = null;
+  currentNodeName = null;
 
   if (preloaded && preloaded.keys){
     window.keys = [];
@@ -397,9 +402,14 @@ function toggleMeshPass(){
 
 async function save(key){
   const val = document.getElementById('i-'+key).value;
-  const res = await api('/save', {key, value: val});
+  let res;
+  if (currentNodeId){
+    res = await api('/mesh/saveRemote', {nodeId: currentNodeId, key, value: val});
+  }else{
+    res = await api('/save', {key, value: val});
+  }
   if (res.success) { $('e-'+key).textContent = ''; }
-  else { $('e-'+key).textContent = res.error; }
+  else { $('e-'+key).textContent = res.error || 'Error'; }
 }
 
 async function factoryReset(){
@@ -529,6 +539,35 @@ async function loadMeshState(){
   const data = await api('/mesh/state');
   if (!data || !data.nodes) return;
   meshState = data;
+   // Update current node name label
+  const label = $('nodeNameLabel');
+  if (label){
+    const nid = currentNodeId;
+    let friendly = '';
+    if (nid){
+      const st = (data.states||[]).find(s => s.id === nid);
+      const kn = (data.keys||[]).find(s => s.id === nid);
+      friendly = (st && st.friendly) ? st.friendly : ((kn && kn.friendly) ? kn.friendly : nid);
+    }else{
+      const me = data.nodes.find(n => n.local);
+      friendly = me ? (me.friendly || me.id) : '';
+    }
+    label.textContent = friendly ? `(${friendly})` : '';
+  }
+  // Apply remote keys if selected
+  let applied = false;
+  if (currentNodeId){
+    const rk = (data.keys||[]).find(k => k.id === currentNodeId);
+    if (rk && rk.raw && rk.raw.keys){
+      window.keys = [];
+      rk.raw.keys.forEach(k => window.keys.push(k));
+      applied = true;
+    }
+  }
+  if (!applied && !window.keys){
+    await loadKeys();
+  }
+  if (applied) render();
   const tb = $('mesh-nodes-body');
   if (tb){
     tb.innerHTML = '';
@@ -590,7 +629,15 @@ function openMeshModal(nodeId){
 }
 
 async function requestState(nodeId){
+  currentNodeId = nodeId;
+  currentNodeName = nodeId;
+  const banner = $('nodeBanner');
+  if (banner){
+    banner.classList.add('remote-active');
+    setTimeout(()=>banner.classList.remove('remote-active'),1200);
+  }
   await api('/mesh/requestState', { nodeId });
+  await api('/mesh/requestKeys', { nodeId });
   // Wait a bit then reload mesh state to pick new state
   setTimeout(loadMeshState, 1000);
   setTimeout(loadMeshState, 3000);

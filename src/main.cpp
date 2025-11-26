@@ -32,29 +32,6 @@ void EnsurePreferencesFresh();
 void ApplyClockFromMs(uint64_t timestampMs, bool broadcastMesh);
 String formatTimestampReadable(uint64_t timestampMs);
 bool IsValidEpoch(uint64_t ms);
-String MeshNet_GetLocalFriendly();
-struct ConfigKey;
-uint64_t DeviceNowMs();
-extern const uint8_t kTimeSyncTtl;
-extern String validateKey(const String &key, const String &value);
-String buildKeysSnapshotJson();
-String buildKeysPageJson(int startIndex);
-extern Preferences prefs;
-extern ConfigKey defaultKeys[];
-extern int numKeys;
-const uint8_t kKeysPerPage = 2; // keep mesh payload small
-
-// Forward declare public state vars used in mesh state sharing
-extern bool public_PirEnabled;
-extern bool public_VibEnabled;
-extern bool public_LedEnabled;
-extern bool public_AlertEnabled_Buzzer;
-extern int  public_GasValue;
-#if HAS_DHT
-extern float public_TempValue;
-extern float public_HumValue;
-#endif
-extern String MeshNet_GetLocalMacStr();
 
 String formatMacFull(uint64_t mac)
 {
@@ -94,25 +71,27 @@ MeshRemoteAlarm g_remoteAlarm;
 uint32_t g_lastNetworkAlarmMs = 0;
 const uint32_t kNetworkAlarmMinIntervalMs = 5000;
 
-struct RemoteState
+struct RemoteStateEntry
 {
-  String nodeId;
+  String id;
   String friendly;
-  uint64_t tsMs = 0;
-  DynamicJsonDocument data;
-  RemoteState() : data(512) {}
+  uint64_t ts = 0;
+  uint64_t originMac = 0;
+  String rawJson;
 };
-std::vector<RemoteState> g_remoteStates;
 
-struct RemoteKeys
+struct RemoteKeysEntry
 {
-  String nodeId;
+  String id;
+  String sid;
   String friendly;
-  uint64_t tsMs = 0;
-  DynamicJsonDocument data;
-  RemoteKeys() : data(4096) {}
+  uint64_t ts = 0;
+  uint64_t originMac = 0;
+  String rawJson;
 };
-std::vector<RemoteKeys> g_remoteKeys;
+
+std::vector<RemoteStateEntry> g_remoteStates;
+std::vector<RemoteKeysEntry> g_remoteKeys;
 
 // ---- Time formatting (UNCHANGED: +12600 and localtime) ----
 void printTimestampReadable(uint64_t timestampMs)
@@ -120,6 +99,114 @@ void printTimestampReadable(uint64_t timestampMs)
   time_t timestampSec = (timestampMs / 1000) + 12600; // UTC+3:30
   struct tm *timeinfo = localtime(&timestampSec);
   strftime(lastOktime, sizeof(lastOktime), "%Y-%m-%d %H:%M:%S", timeinfo);
+}
+
+RemoteStateEntry *findRemoteState(const String &sid, uint64_t originMac)
+{
+  for (auto &s : g_remoteStates)
+  {
+    if ((sid.length() && s.id.equalsIgnoreCase(sid)) || (originMac && s.originMac == originMac))
+      return &s;
+  }
+  return nullptr;
+}
+
+RemoteKeysEntry *findRemoteKeys(const String &sid, uint64_t originMac)
+{
+  for (auto &k : g_remoteKeys)
+  {
+    if ((sid.length() && (k.sid.equalsIgnoreCase(sid) || k.id.equalsIgnoreCase(sid))) || (originMac && k.originMac == originMac))
+      return &k;
+  }
+  return nullptr;
+}
+
+void pruneRemoteCaches()
+{
+  auto pruneVec = [](auto &vec)
+  {
+    constexpr size_t kMaxKeep = 6;
+    while (vec.size() > kMaxKeep)
+    {
+      vec.erase(vec.begin());
+    }
+  };
+  pruneVec(g_remoteStates);
+  pruneVec(g_remoteKeys);
+}
+
+void cacheRemoteState(const MeshEventInfo &info)
+{
+  DynamicJsonDocument doc(1024);
+  if (deserializeJson(doc, info.payload) != DeserializationError::Ok)
+  {
+    logf(1, "[MESH] STATE_RES parse failed from %s payload=%s\n", formatMacFull(info.originMac).c_str(), info.payload.c_str());
+    return;
+  }
+  String sid = doc["id"] | formatMacShort(info.originMac);
+  String friendly = doc["node"] | info.originNode;
+  String raw;
+  serializeJson(doc, raw);
+
+  RemoteStateEntry *existing = findRemoteState(sid, info.originMac);
+  if (existing)
+  {
+    existing->ts = info.timestampMs;
+    existing->friendly = friendly;
+    existing->rawJson = raw;
+    existing->originMac = info.originMac;
+  }
+  else
+  {
+    RemoteStateEntry ent;
+    ent.id = sid;
+    ent.friendly = friendly;
+    ent.ts = info.timestampMs;
+    ent.originMac = info.originMac;
+    ent.rawJson = raw;
+    g_remoteStates.push_back(ent);
+    pruneRemoteCaches();
+  }
+  logf(1, "[MESH] Cached STATE_RES for %s (%s)\n", friendly.c_str(), sid.c_str());
+}
+
+void cacheRemoteKeys(const MeshEventInfo &info)
+{
+  DynamicJsonDocument doc(3072);
+  if (deserializeJson(doc, info.payload) != DeserializationError::Ok)
+  {
+    logf(1, "[MESH] KEYS_RES parse failed from %s payload=%s\n", formatMacFull(info.originMac).c_str(), info.payload.c_str());
+    return;
+  }
+  String sid = doc["sid"] | doc["id"] | formatMacShort(info.originMac);
+  String id = doc["id"] | sid;
+  String friendly = doc["node"] | info.originNode;
+  String raw;
+  serializeJson(doc, raw);
+
+  RemoteKeysEntry *existing = findRemoteKeys(sid, info.originMac);
+  if (existing)
+  {
+    existing->ts = info.timestampMs;
+    existing->friendly = friendly;
+    existing->rawJson = raw;
+    existing->sid = sid;
+    existing->id = id;
+    existing->originMac = info.originMac;
+  }
+  else
+  {
+    RemoteKeysEntry ent;
+    ent.id = id;
+    ent.sid = sid;
+    ent.friendly = friendly;
+    ent.ts = info.timestampMs;
+    ent.rawJson = raw;
+    ent.originMac = info.originMac;
+    g_remoteKeys.push_back(ent);
+    pruneRemoteCaches();
+  }
+  logf(1, "[MESH] Cached KEYS_RES for %s (%s)\n", friendly.c_str(), sid.c_str());
 }
 
 void handleMeshEvent(const MeshEventInfo &info)
@@ -132,19 +219,23 @@ void handleMeshEvent(const MeshEventInfo &info)
   String labeledName = originName + tag;
   String payloadTrim = info.payload;
   payloadTrim.trim();
-  logf(1, "[MESH_EVT] msg=%s from=%s [%s] type=%s payload=%s sms=%d siren=%d ttl=%u ts=%llu\n",
-       info.messageId.c_str(),
-       labeledName.c_str(),
-       macFull.c_str(),
-       info.type.c_str(),
-       info.payload.c_str(),
-       (int)info.requiresSms,
-       (int)info.requiresSiren,
-       (unsigned)info.ttl,
-       (unsigned long long)info.timestampMs);
   String typeUpper = info.type;
   typeUpper.trim();
   typeUpper.toUpperCase();
+  bool noisyType = (typeUpper == "TIME");
+  if (!noisyType)
+  {
+    logf(1, "[MESH_EVT] msg=%s from=%s [%s] type=%s payload=%s sms=%d siren=%d ttl=%u ts=%llu\n",
+         info.messageId.c_str(),
+         labeledName.c_str(),
+         macFull.c_str(),
+         info.type.c_str(),
+         info.payload.c_str(),
+         (int)info.requiresSms,
+         (int)info.requiresSiren,
+         (unsigned)info.ttl,
+         (unsigned long long)info.timestampMs);
+  }
   if (typeUpper == "TIME")
   {
     uint64_t remoteMs = strtoull(info.payload.c_str(), nullptr, 10);
@@ -158,208 +249,14 @@ void handleMeshEvent(const MeshEventInfo &info)
     }
     return;
   }
-  if (typeUpper == "STATE_REQ")
-  {
-    logf(1, "[MESH] STATE_REQ from %s target=%s\n", labeledName.c_str(), payloadTrim.c_str());
-    // payload carries target nodeId
-    String target = payloadTrim;
-    target.trim();
-    String localMacFull = MeshNet_GetLocalMacStr();
-    if (target.length() == 0 || target == MeshNet_GetLocalNodeId() || target == MeshNet_GetLocalFriendly() || target == localMacFull)
-    {
-      // Build compact state JSON
-      DynamicJsonDocument doc(256);
-      doc["node"] = MeshNet_GetLocalFriendly();
-      doc["id"] = MeshNet_GetLocalNodeId();
-      doc["time"] = DeviceNowMs();
-      doc["gas"] = public_GasValue;
-#if HAS_DHT
-      doc["temp"] = public_TempValue;
-      doc["hum"] = public_HumValue;
-#endif
-      doc["pir"] = public_PirEnabled;
-      doc["vib"] = public_VibEnabled;
-      doc["led"] = public_LedEnabled;
-      doc["buz"] = public_AlertEnabled_Buzzer;
-      String out;
-      serializeJson(doc, out);
-      MeshNet_RecordNetworkEvent("STATE_RES", out, false, false, kTimeSyncTtl, DeviceNowMs());
-    }
-    return;
-  }
   if (typeUpper == "STATE_RES")
   {
-    logf(1, "[MESH] STATE_RES from %s len=%u\n", labeledName.c_str(), (unsigned)info.payload.length());
-    // payload is JSON snapshot
-    DynamicJsonDocument doc(512);
-    if (deserializeJson(doc, info.payload) == DeserializationError::Ok)
-    {
-      String nid = doc.containsKey("id") ? String((const char *)doc["id"]) : originName;
-      bool found = false;
-      for (auto &st : g_remoteStates)
-      {
-        if (st.nodeId == nid)
-        {
-          st.data = doc;
-          st.tsMs = info.timestampMs;
-          st.nodeId = nid;
-          st.friendly = doc.containsKey("node") ? String((const char *)doc["node"]) : originName;
-          found = true;
-          break;
-        }
-      }
-      if (!found)
-      {
-        RemoteState st;
-        st.nodeId = nid;
-        st.friendly = doc.containsKey("node") ? String((const char *)doc["node"]) : originName;
-        st.tsMs = info.timestampMs;
-        st.data = doc;
-        g_remoteStates.push_back(st);
-      }
-    }
-    return;
-  }
-  if (typeUpper == "KEYS_REQ")
-  {
-    logf(1, "[MESH] KEYS_REQ from %s target=%s\n", labeledName.c_str(), payloadTrim.c_str());
-    String target = payloadTrim;
-    target.trim();
-    String localMacFull = MeshNet_GetLocalMacStr();
-    if (target.length() == 0 || target == MeshNet_GetLocalNodeId() || target == MeshNet_GetLocalFriendly() || target == localMacFull)
-    {
-      for (int start = 0; start < numKeys; start += kKeysPerPage)
-      {
-        String out = buildKeysPageJson(start);
-        MeshNet_RecordNetworkEvent("KEYS_RES", out, false, false, kTimeSyncTtl, DeviceNowMs());
-      }
-    }
+    cacheRemoteState(info);
     return;
   }
   if (typeUpper == "KEYS_RES")
   {
-    logf(1, "[MESH] KEYS_RES from %s len=%u\n", labeledName.c_str(), (unsigned)info.payload.length());
-    DynamicJsonDocument doc(4096);
-    if (deserializeJson(doc, info.payload) == DeserializationError::Ok)
-    {
-      String nid = doc.containsKey("id") ? String((const char *)doc["id"]) : originName;
-      int pageStart = doc["p"] | 0;
-      bool found = false;
-      for (auto &rk : g_remoteKeys)
-      {
-        if (rk.nodeId == nid)
-        {
-          rk.tsMs = info.timestampMs;
-          rk.nodeId = nid;
-          rk.friendly = doc.containsKey("friendly") ? String((const char *)doc["friendly"]) : originName;
-          if (doc.containsKey("sid")) rk.data["sid"] = String((const char *)doc["sid"]);
-          // init/clear on first page
-          if (pageStart == 0 || !rk.data.containsKey("keys"))
-          {
-            rk.data.clear();
-            rk.data.garbageCollect();
-            rk.data["id"] = nid;
-            rk.data["friendly"] = rk.friendly;
-            if (doc.containsKey("sid")) rk.data["sid"] = String((const char *)doc["sid"]);
-            rk.data["total"] = doc["total"] | numKeys;
-            rk.data["p"] = pageStart;
-            rk.data["keys"] = rk.data.createNestedArray("keys");
-          }
-          // append keys
-          if (doc.containsKey("keys"))
-          {
-            JsonArray dest = rk.data["keys"].as<JsonArray>();
-            for (JsonObject k : doc["keys"].as<JsonArray>())
-              dest.add(k);
-          }
-          rk.data["p"] = pageStart;
-          found = true;
-          break;
-        }
-      }
-      if (!found)
-      {
-        RemoteKeys rk;
-        rk.nodeId = nid;
-        rk.friendly = doc.containsKey("friendly") ? String((const char *)doc["friendly"]) : originName;
-        rk.tsMs = info.timestampMs;
-        rk.data.clear();
-        rk.data.garbageCollect();
-        rk.data["id"] = nid;
-        rk.data["friendly"] = rk.friendly;
-        if (doc.containsKey("sid")) rk.data["sid"] = String((const char *)doc["sid"]);
-        rk.data["total"] = doc["total"] | numKeys;
-        rk.data["p"] = pageStart;
-        rk.data["keys"] = rk.data.createNestedArray("keys");
-        if (doc.containsKey("keys"))
-        {
-          JsonArray dest = rk.data["keys"].as<JsonArray>();
-          for (JsonObject k : doc["keys"].as<JsonArray>())
-            dest.add(k);
-        }
-        g_remoteKeys.push_back(rk);
-      }
-    }
-    return;
-  }
-  if (typeUpper == "CFG_SET")
-  {
-    logf(1, "[MESH] CFG_SET from %s payload=%s\n", labeledName.c_str(), info.payload.c_str());
-    DynamicJsonDocument doc(256);
-    if (deserializeJson(doc, info.payload) == DeserializationError::Ok)
-    {
-      String target = doc["id"] | "";
-      String key = doc["key"] | "";
-      String val = doc["value"] | "";
-      String localMacFull = MeshNet_GetLocalMacStr();
-      if (target.length() == 0 || target == MeshNet_GetLocalNodeId() || target == MeshNet_GetLocalFriendly() || target == localMacFull)
-      {
-        String res = validateKey(key, val);
-        bool ok = (res == "1");
-        if (ok)
-        {
-          prefs.putString(key.c_str(), val);
-          SetPublicVariablesFromPrefs();
-        }
-        DynamicJsonDocument ack(256);
-        ack["id"] = target.length() ? target : MeshNet_GetLocalNodeId();
-        ack["key"] = key;
-        ack["ok"] = ok;
-        ack["val"] = val;
-        if (!ok) ack["err"] = res;
-        String out; serializeJson(ack, out);
-        MeshNet_RecordNetworkEvent("CFG_ACK", out, false, false, kTimeSyncTtl, DeviceNowMs());
-      }
-    }
-    return;
-  }
-  if (typeUpper == "CFG_ACK")
-  {
-    logf(1, "[MESH] CFG_ACK from %s payload=%s\n", labeledName.c_str(), info.payload.c_str());
-    DynamicJsonDocument doc(256);
-    if (deserializeJson(doc, info.payload) == DeserializationError::Ok)
-    {
-      String nid = doc["id"] | originName;
-      String key = doc["key"] | "";
-      bool ok = doc["ok"] | false;
-      for (auto &rk : g_remoteKeys)
-      {
-        if (rk.nodeId == nid && rk.data.containsKey("keys"))
-        {
-          JsonArray arr = rk.data["keys"].as<JsonArray>();
-          for (JsonObject k : arr)
-          {
-            if (String((const char *)k["key"]) == key)
-            {
-              if (doc.containsKey("val"))
-                k["value"] = (const char *)doc["val"];
-              break;
-            }
-          }
-        }
-      }
-      logf(1, "[CFG_ACK] node=%s key=%s ok=%d\n", nid.c_str(), key.c_str(), (int)ok);
-    }
+    cacheRemoteKeys(info);
     return;
   }
   if (payloadTrim.startsWith("GAS 0"))
@@ -622,7 +519,6 @@ String deviceName;
 
 struct ConfigKey
 {
-  uint8_t id;
   String key;
   String title; // caption (fa-IR)
   String type; // string, int, bool, dropdown, mobile
@@ -635,47 +531,47 @@ struct ConfigKey
 
 //                           :                                                    +                                    
 ConfigKey defaultKeys[] = {
-    {0, "wifi_Ssid_Name",   "??? ???? ?? (SSID)",     "string", ssidNameDefault,      "2",  "32",  "",            false},
-    {1, "Ssid_Password",    "??? ???? ??",                  "string", ssidPasswordDefault,  "8",  "32",  "",            false},
+    {"wifi_Ssid_Name",   "??? ???? ?? (SSID)",     "string", ssidNameDefault,      "2",  "32",  "",            false},
+    {"Ssid_Password",    "??? ???? ??",                  "string", ssidPasswordDefault,  "8",  "32",  "",            false},
 
-    {2, "deviceName",       "                   ",                "string", "            ",             "3",  "20",  "",            false},
+    {"deviceName",       "                   ",                "string", "            ",             "3",  "20",  "",            false},
 
     //                             :
-    {3, "SystemEnabled",    "                            ",           "bool",   "true",               "",   "",    "true,false", true},
+    {"SystemEnabled",    "                            ",           "bool",   "true",               "",   "",    "true,false", true},
     #if HAS_PIR
-{4,"PirEnabled",       "                             PIR",       "bool",   "true",               "",   "",    "true,false", false},
+{"PirEnabled",       "                             PIR",       "bool",   "true",               "",   "",    "true,false", false},
     #endif
 #if HAS_VIB
-{5,"VibEnabled",       "                                     ",      "bool",   "true",               "",   "",    "true,false", false},
+{"VibEnabled",       "                                     ",      "bool",   "true",               "",   "",    "true,false", false},
     #endif
-{6,"LedEnabled",       "                  LED",             "bool",   "true",               "",   "",    "true,false", false},
-    {7,"BuzzerEnabled",    "                          ",            "bool",   "false",              "",   "",    "true,false", false},
-    {8,"SmsAlertEnabled",  "                                        ",     "bool",   "true",               "",   "",    "true,false", false},
-    {9,"SmsTxEnabled",     "                  SMS",             "bool",   "true",               "",   "",    "true,false", false},
-    {10,"WifiEnabled",      "                  WiFi (SoftAP)",   "bool",   "true",               "",   "",    "true,false", false},
-    {11,"mesh_name",        "Mesh Name",                        "string", meshNameDefault,       "3",  "32",  "",            true},
-    {12,"mesh_pass",        "Mesh Password",                    "string", meshPasswordDefault,   "8",  "32",  "",            true},
+{"LedEnabled",       "                  LED",             "bool",   "true",               "",   "",    "true,false", false},
+    {"BuzzerEnabled",    "                          ",            "bool",   "false",              "",   "",    "true,false", false},
+    {"SmsAlertEnabled",  "                                        ",     "bool",   "true",               "",   "",    "true,false", false},
+    {"SmsTxEnabled",     "                  SMS",             "bool",   "true",               "",   "",    "true,false", false},
+    {"WifiEnabled",      "                  WiFi (SoftAP)",   "bool",   "true",               "",   "",    "true,false", false},
+    {"mesh_name",        "Mesh Name",                        "string", meshNameDefault,       "3",  "32",  "",            true},
+    {"mesh_pass",        "Mesh Password",                    "string", meshPasswordDefault,   "8",  "32",  "",            true},
 
     //                   (MQ)
     #if HAS_GAS
-{13,"GasEnabled",       "                                    (MQ)",  "bool",   "true",               "",   "",    "true,false", false},
-    {14,"GasMin",           "                               ",         "int",    "300",               "0",  "4095","",            false},
-    {15,"GasMax",           "                               ",         "int",    "2500",              "0",  "4095","",            false},
+{"GasEnabled",       "                                    (MQ)",  "bool",   "true",               "",   "",    "true,false", false},
+    {"GasMin",           "                               ",         "int",    "300",               "0",  "4095","",            false},
+    {"GasMax",           "                               ",         "int",    "2500",              "0",  "4095","",            false},
 
     #endif
     #if HAS_DHT
-    {16,"DhtEnabled",       "DHT Enabled",                  "bool",   "true",               "",   "",    "true,false",  false},
-    {17,"TempMin",          "Temp Min (C)",                 "int",    "10",                "-40","125", "",            false},
-    {18,"TempMax",          "Temp Max (C)",                 "int",    "40",                "-40","125", "",            false},
-    {19,"HumMin",           "Humidity Min (%)",           "int",    "20",                "0","100", "",            false},
-    {20,"HumMax",           "Humidity Max (%)",           "int",    "80",                "0","100", "",            false},
+    {"DhtEnabled",       "DHT Enabled",                  "bool",   "true",               "",   "",    "true,false",  false},
+    {"TempMin",          "Temp Min (C)",                 "int",    "10",                "-40","125", "",            false},
+    {"TempMax",          "Temp Max (C)",                 "int",    "40",                "-40","125", "",            false},
+    {"HumMin",           "Humidity Min (%)",           "int",    "20",                "0","100", "",            false},
+    {"HumMax",           "Humidity Max (%)",           "int",    "80",                "0","100", "",            false},
     #endif
-{21,"OwnerMobile",      "                   ",                "mobile", "",                   "10", "12",  "",            false},
-    {22,"alternetMobile",   "                         ",            "mobile", "",                   "10", "10",  "",            false},
-    {23,"AlternetMobiles",  "                                   (*      )",  "string", "",                   "10", "100", "",            false},
+{"OwnerMobile",      "                   ",                "mobile", "",                   "10", "12",  "",            false},
+    {"alternetMobile",   "                         ",            "mobile", "",                   "10", "10",  "",            false},
+    {"AlternetMobiles",  "                                   (*      )",  "string", "",                   "10", "100", "",            false},
 };
 
-int numKeys = sizeof(defaultKeys) / sizeof(defaultKeys[0]);
+const int numKeys = sizeof(defaultKeys) / sizeof(defaultKeys[0]);
 
 // ===================== HTML =====================
 
@@ -772,63 +668,6 @@ String validateKey(const String &key, const String &value)
     }
   }
   return "                       ";
-}
-
-// Build KEYS_RES page starting from index 'start'
-String buildKeysPageJson(int startIndex)
-{
-  DynamicJsonDocument doc(1024);
-  JsonArray arr = doc.createNestedArray("keys");
-  int count = 0;
-  for (int i = startIndex; i < numKeys && count < kKeysPerPage; i++, count++)
-  {
-    JsonObject obj = arr.createNestedObject();
-    obj["id"] = defaultKeys[i].id;
-    obj["key"] = defaultKeys[i].key;
-    obj["title"] = defaultKeys[i].title;
-    obj["type"] = defaultKeys[i].type;
-    obj["value"] = prefs.getString(defaultKeys[i].key.c_str(), defaultKeys[i].defaultVal);
-    obj["min"] = defaultKeys[i].min;
-    obj["max"] = defaultKeys[i].max;
-    obj["options"] = defaultKeys[i].options;
-    obj["isSystem"] = defaultKeys[i].isSystem;
-    obj["idx"] = i;
-  }
-  doc["friendly"] = MeshNet_GetLocalFriendly();
-  doc["id"] = MeshNet_GetLocalMacStr();
-  doc["sid"] = MeshNet_GetLocalNodeId();
-  doc["mac"] = MeshNet_GetLocalMacStr();
-  doc["p"] = startIndex;
-  doc["total"] = numKeys;
-  String out;
-  serializeJson(doc, out);
-  return out;
-}
-
-String buildKeysSnapshotJson()
-{
-  DynamicJsonDocument doc(4096);
-  JsonArray arr = doc.createNestedArray("keys");
-  for (int i = 0; i < numKeys; i++)
-  {
-    JsonObject obj = arr.createNestedObject();
-    obj["id"] = defaultKeys[i].id;
-    obj["key"] = defaultKeys[i].key;
-    obj["title"] = defaultKeys[i].title;
-    obj["type"] = defaultKeys[i].type;
-    obj["value"] = prefs.getString(defaultKeys[i].key.c_str(), defaultKeys[i].defaultVal);
-    obj["min"] = defaultKeys[i].min;
-    obj["max"] = defaultKeys[i].max;
-    obj["options"] = defaultKeys[i].options;
-    obj["isSystem"] = defaultKeys[i].isSystem;
-  }
-  doc["friendly"] = MeshNet_GetLocalFriendly();
-  doc["id"] = MeshNet_GetLocalMacStr();
-  doc["sid"] = MeshNet_GetLocalNodeId();
-  doc["mac"] = MeshNet_GetLocalMacStr();
-  String out;
-  serializeJson(doc, out);
-  return out;
 }
 
 // ===================== SMS LOG (Archive 200) =====================
@@ -1169,86 +1008,44 @@ void HtmlFunctions()
   server.on("/api/mesh/state", HTTP_GET, [](AsyncWebServerRequest *req)
             {
     if (!authenticateWeb(req)) { req->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
-
-    auto buildStateDoc = []() -> DynamicJsonDocument {
-      DynamicJsonDocument doc(32768);
-      JsonArray nodes = doc.createNestedArray("nodes");
-      MeshNet_SerializeNodes(nodes);
-      JsonArray events = doc.createNestedArray("events");
-      MeshNet_SerializeEvents(events);
-      JsonArray states = doc.createNestedArray("states");
-      for (auto &st : g_remoteStates)
-      {
-        JsonObject o = states.createNestedObject();
-        o["id"] = st.nodeId;
-        o["friendly"] = st.friendly;
-        o["ts"] = st.tsMs;
-        o["raw"] = st.data.as<JsonObject>();
-      }
-      JsonArray keysArr = doc.createNestedArray("keys");
-      for (auto &rk : g_remoteKeys)
-      {
-        JsonObject o = keysArr.createNestedObject();
-        o["id"] = rk.nodeId;
-        if (rk.data.containsKey("sid")) o["sid"] = rk.data["sid"];
-        o["friendly"] = rk.friendly;
-        o["ts"] = rk.tsMs;
-        o["raw"] = rk.data.as<JsonObject>();
-      }
-      // local keys snapshot (self)
-      {
-        JsonObject o = keysArr.createNestedObject();
-        o["id"] = MeshNet_GetLocalMacStr();
-        o["sid"] = MeshNet_GetLocalNodeId();
-        o["friendly"] = MeshNet_GetLocalFriendly();
-        o["ts"] = DeviceNowMs();
-        DynamicJsonDocument tmp(4096);
-        if (deserializeJson(tmp, buildKeysSnapshotJson()) == DeserializationError::Ok)
-          o["raw"] = tmp.as<JsonObject>();
-      }
-      return doc;
-    };
-
-    DynamicJsonDocument doc = buildStateDoc();
-    if (doc.overflowed())
+    DynamicJsonDocument doc(24576);
+    JsonArray nodes = doc.createNestedArray("nodes");
+    MeshNet_SerializeNodes(nodes);
+    JsonArray events = doc.createNestedArray("events");
+    MeshNet_SerializeEvents(events);
+    JsonArray states = doc.createNestedArray("states");
+    for (const auto &st : g_remoteStates)
     {
-      logf(1, "[API] mesh/state overflow -> rebuilding without events\n");
-      DynamicJsonDocument slim(24576);
-      JsonArray nodes = slim.createNestedArray("nodes");
-      MeshNet_SerializeNodes(nodes);
-      JsonArray states = slim.createNestedArray("states");
-      for (auto &st : g_remoteStates)
+      JsonObject obj = states.createNestedObject();
+      obj["id"] = st.id;
+      obj["friendly"] = st.friendly;
+      obj["ts"] = (uint64_t)st.ts;
+      if (st.rawJson.length())
       {
-        JsonObject o = states.createNestedObject();
-        o["id"] = st.nodeId;
-        o["friendly"] = st.friendly;
-        o["ts"] = st.tsMs;
-        o["raw"] = st.data.as<JsonObject>();
+        DynamicJsonDocument tmp(1024);
+        if (deserializeJson(tmp, st.rawJson) == DeserializationError::Ok)
+          obj["raw"] = tmp.as<JsonVariant>();
+        else
+          obj["rawJson"] = st.rawJson;
       }
-      JsonArray keysArr = slim.createNestedArray("keys");
-      for (auto &rk : g_remoteKeys)
-      {
-        JsonObject o = keysArr.createNestedObject();
-        o["id"] = rk.nodeId;
-        if (rk.data.containsKey("sid")) o["sid"] = rk.data["sid"];
-        o["friendly"] = rk.friendly;
-        o["ts"] = rk.tsMs;
-        o["raw"] = rk.data.as<JsonObject>();
-      }
-      JsonObject o = keysArr.createNestedObject();
-      o["id"] = MeshNet_GetLocalMacStr();
-      o["sid"] = MeshNet_GetLocalNodeId();
-      o["friendly"] = MeshNet_GetLocalFriendly();
-      o["ts"] = DeviceNowMs();
-      DynamicJsonDocument tmp(4096);
-      if (deserializeJson(tmp, buildKeysSnapshotJson()) == DeserializationError::Ok)
-        o["raw"] = tmp.as<JsonObject>();
-
-      String out; serializeJson(slim, out);
-      req->send(200, "application/json", out);
-      return;
     }
-
+    JsonArray keys = doc.createNestedArray("keys");
+    for (const auto &k : g_remoteKeys)
+    {
+      JsonObject obj = keys.createNestedObject();
+      obj["id"] = k.id;
+      obj["sid"] = k.sid;
+      obj["friendly"] = k.friendly;
+      obj["ts"] = (uint64_t)k.ts;
+      if (k.rawJson.length())
+      {
+        DynamicJsonDocument tmp(2048);
+        if (deserializeJson(tmp, k.rawJson) == DeserializationError::Ok)
+          obj["raw"] = tmp.as<JsonVariant>();
+        else
+          obj["rawJson"] = k.rawJson;
+      }
+    }
     String out; serializeJson(doc, out);
     req->send(200, "application/json", out); });
 
@@ -1268,61 +1065,6 @@ void HtmlFunctions()
     String out; serializeJson(doc, out);
     req->send(200, "application/json", out); });
 
-  server.addHandler(new AsyncCallbackJsonWebHandler("/api/mesh/requestState", [](AsyncWebServerRequest *request, JsonVariant &json)
-                                                    {
-    if (!authenticateWeb(request)) { request->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
-    if (!json.is<JsonObject>()) { request->send(400,"application/json","{\"error\":\"         JSON                      \"}"); return; }
-    String target = json["nodeId"] | "";
-    if (target.length() == 0)
-    {
-      request->send(400,"application/json","{\"error\":\"nodeId required\"}");
-      return;
-    }
-    MeshNet_RecordNetworkEvent("STATE_REQ", target, false, false, kTimeSyncTtl, DeviceNowMs());
-    DynamicJsonDocument resp(128);
-    resp["success"] = true;
-    String out; serializeJson(resp, out);
-    request->send(200, "application/json", out); }));
-
-  server.addHandler(new AsyncCallbackJsonWebHandler("/api/mesh/requestKeys", [](AsyncWebServerRequest *request, JsonVariant &json)
-                                                    {
-    if (!authenticateWeb(request)) { request->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
-    if (!json.is<JsonObject>()) { request->send(400,"application/json","{\"error\":\"         JSON                      \"}"); return; }
-    String target = json["nodeId"] | "";
-    if (target.length() == 0)
-    {
-      request->send(400,"application/json","{\"error\":\"nodeId required\"}");
-      return;
-    }
-    MeshNet_RecordNetworkEvent("KEYS_REQ", target, false, false, kTimeSyncTtl, DeviceNowMs());
-    DynamicJsonDocument resp(128);
-    resp["success"] = true;
-    String out; serializeJson(resp, out);
-    request->send(200, "application/json", out); }));
-
-  server.addHandler(new AsyncCallbackJsonWebHandler("/api/mesh/saveRemote", [](AsyncWebServerRequest *request, JsonVariant &json)
-                                                    {
-    if (!authenticateWeb(request)) { request->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
-    if (!json.is<JsonObject>()) { request->send(400,"application/json","{\"error\":\"         JSON                      \"}"); return; }
-    String target = json["nodeId"] | "";
-    String key = json["key"] | "";
-    String value = json["value"] | "";
-    if (target.length() == 0 || key.length() == 0)
-    {
-      request->send(400,"application/json","{\"error\":\"nodeId and key required\"}");
-      return;
-    }
-    DynamicJsonDocument doc(256);
-    doc["id"] = target;
-    doc["key"] = key;
-    doc["value"] = value;
-    String payload; serializeJson(doc, payload);
-    MeshNet_RecordNetworkEvent("CFG_SET", payload, false, false, kTimeSyncTtl, DeviceNowMs());
-    DynamicJsonDocument resp(128);
-    resp["success"] = true;
-    String out; serializeJson(resp, out);
-    request->send(200, "application/json", out); }));
-
   server.addHandler(new AsyncCallbackJsonWebHandler("/api/login", [](AsyncWebServerRequest *request, JsonVariant &json)
                                                     {
     if (!json.is<JsonObject>()) { request->send(400,"application/json","{\"error\":\"         JSON                      \"}"); return; }
@@ -1339,6 +1081,43 @@ void HtmlFunctions()
     } else {
       request->send(401, "application/json", "{\"error\":\"                                            \"}");
     } }));
+
+  server.addHandler(new AsyncCallbackJsonWebHandler("/api/mesh/requestState", [](AsyncWebServerRequest *request, JsonVariant &json)
+                                                    {
+    if (!authenticateWeb(request)) { request->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
+    if (!json.is<JsonObject>()) { request->send(400,"application/json","{\"error\":\"invalid json\"}"); return; }
+    String nodeId = json["nodeId"] | "";
+    nodeId.trim();
+    if (!nodeId.length()) { request->send(400,"application/json","{\"error\":\"nodeId required\"}"); return; }
+    MeshNet_RecordNetworkEvent("STATE_REQ", nodeId, false, false, 8, DeviceNowMs());
+    request->send(200, "application/json", "{\"success\":true}"); }));
+
+  server.addHandler(new AsyncCallbackJsonWebHandler("/api/mesh/requestKeys", [](AsyncWebServerRequest *request, JsonVariant &json)
+                                                    {
+    if (!authenticateWeb(request)) { request->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
+    if (!json.is<JsonObject>()) { request->send(400,"application/json","{\"error\":\"invalid json\"}"); return; }
+    String nodeId = json["nodeId"] | "";
+    nodeId.trim();
+    if (!nodeId.length()) { request->send(400,"application/json","{\"error\":\"nodeId required\"}"); return; }
+    MeshNet_RecordNetworkEvent("KEYS_REQ", nodeId, false, false, 8, DeviceNowMs());
+    request->send(200, "application/json", "{\"success\":true}"); }));
+
+  server.addHandler(new AsyncCallbackJsonWebHandler("/api/mesh/saveRemote", [](AsyncWebServerRequest *request, JsonVariant &json)
+                                                    {
+    if (!authenticateWeb(request)) { request->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
+    if (!json.is<JsonObject>()) { request->send(400,"application/json","{\"error\":\"invalid json\"}"); return; }
+    String nodeId = json["nodeId"] | "";
+    String key = json["key"] | "";
+    String value = json["value"] | "";
+    nodeId.trim(); key.trim();
+    if (!nodeId.length() || !key.length()) { request->send(400,"application/json","{\"error\":\"nodeId and key required\"}"); return; }
+    DynamicJsonDocument doc(256);
+    doc["k"] = key;
+    doc["v"] = value;
+    String payload;
+    serializeJson(doc, payload);
+    MeshNet_RecordNetworkEvent("KEY_SET", payload, false, false, 8, DeviceNowMs());
+    request->send(200, "application/json", "{\"success\":true}"); }));
 
   server.addHandler(new AsyncCallbackJsonWebHandler("/api/save", [](AsyncWebServerRequest *request, JsonVariant &json)
                                                     {

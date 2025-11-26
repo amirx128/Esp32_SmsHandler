@@ -123,16 +123,12 @@ RemoteKeysEntry *findRemoteKeys(const String &sid, uint64_t originMac)
 
 void pruneRemoteCaches()
 {
-  auto pruneVec = [](auto &vec)
-  {
-    constexpr size_t kMaxKeep = 6;
-    while (vec.size() > kMaxKeep)
-    {
-      vec.erase(vec.begin());
-    }
-  };
-  pruneVec(g_remoteStates);
-  pruneVec(g_remoteKeys);
+  // C++11-friendly helper to cap vector size
+  const size_t kMaxKeep = 6;
+  while (g_remoteStates.size() > kMaxKeep)
+    g_remoteStates.erase(g_remoteStates.begin());
+  while (g_remoteKeys.size() > kMaxKeep)
+    g_remoteKeys.erase(g_remoteKeys.begin());
 }
 
 void cacheRemoteState(const MeshEventInfo &info)

@@ -872,6 +872,17 @@ void MeshNet_Tick()
   if (!g_initialized || !g_espNowReady)
     return;
 
+  // اگر لیست نودها به هر دلیل خالی شد یا نود محلی حذف شد، دوباره خودمان را درج و HELLO بفرستیم
+  bool hasLocal = false;
+  for (const auto &n : g_nodes)
+    if (n.isLocal)
+      hasLocal = true;
+  if (!hasLocal)
+  {
+    updateLocalNodeEntry();
+    broadcastHello();
+  }
+
   uint32_t now = millis();
   if (g_capsDirty || (uint32_t)(now - g_lastHelloMs) >= kHelloIntervalMs)
     broadcastHello();

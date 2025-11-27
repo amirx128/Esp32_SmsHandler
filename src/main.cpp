@@ -7,6 +7,7 @@
 #include <time.h>
 #include <stdlib.h>
 #include <vector>
+#include <algorithm>
 #include "DeviceConfig.h"
 #include "MeshlessNetwork.h"
 #include "Logger.h"
@@ -32,6 +33,12 @@ void EnsurePreferencesFresh();
 void ApplyClockFromMs(uint64_t timestampMs, bool broadcastMesh);
 String formatTimestampReadable(uint64_t timestampMs);
 bool IsValidEpoch(uint64_t ms);
+bool matchesLocalNode(const String &target);
+void sendMeshStateResponse(uint8_t ttl = 6, const String &requesterMac = "");
+void sendMeshKeysResponse(uint8_t ttl = 6, const String &requesterMac = "");
+String validateKey(const String &key, const String &value);
+bool matchesLocalRequester(const String &req);
+extern const int numKeys;
 
 String formatMacFull(uint64_t mac)
 {
@@ -92,6 +99,8 @@ struct RemoteKeysEntry
 
 std::vector<RemoteStateEntry> g_remoteStates;
 std::vector<RemoteKeysEntry> g_remoteKeys;
+Preferences prefs;
+Preferences prefsClock;
 
 // ---- Time formatting (UNCHANGED: +12600 and localtime) ----
 void printTimestampReadable(uint64_t timestampMs)
@@ -131,6 +140,8 @@ void pruneRemoteCaches()
     g_remoteKeys.erase(g_remoteKeys.begin());
 }
 
+void cacheRemoteKeys(const MeshEventInfo &info);
+
 void cacheRemoteState(const MeshEventInfo &info)
 {
   DynamicJsonDocument doc(1024);
@@ -139,7 +150,13 @@ void cacheRemoteState(const MeshEventInfo &info)
     logf(1, "[MESH] STATE_RES parse failed from %s payload=%s\n", formatMacFull(info.originMac).c_str(), info.payload.c_str());
     return;
   }
-  String sid = doc["id"] | formatMacShort(info.originMac);
+  String req = doc["r"] | doc["req"] | "";
+  if (req.length() && !matchesLocalRequester(req))
+  {
+    logf(1, "[MESH] STATE_RES ignored (not for me) from %s req=%s\n", formatMacFull(info.originMac).c_str(), req.c_str());
+    return;
+  }
+  String sid = doc["id"] | doc["i"] | formatMacShort(info.originMac);
   String friendly = doc["node"] | info.originNode;
   String raw;
   serializeJson(doc, raw);
@@ -166,44 +183,6 @@ void cacheRemoteState(const MeshEventInfo &info)
   logf(1, "[MESH] Cached STATE_RES for %s (%s)\n", friendly.c_str(), sid.c_str());
 }
 
-void cacheRemoteKeys(const MeshEventInfo &info)
-{
-  DynamicJsonDocument doc(3072);
-  if (deserializeJson(doc, info.payload) != DeserializationError::Ok)
-  {
-    logf(1, "[MESH] KEYS_RES parse failed from %s payload=%s\n", formatMacFull(info.originMac).c_str(), info.payload.c_str());
-    return;
-  }
-  String sid = doc["sid"] | doc["id"] | formatMacShort(info.originMac);
-  String id = doc["id"] | sid;
-  String friendly = doc["node"] | info.originNode;
-  String raw;
-  serializeJson(doc, raw);
-
-  RemoteKeysEntry *existing = findRemoteKeys(sid, info.originMac);
-  if (existing)
-  {
-    existing->ts = info.timestampMs;
-    existing->friendly = friendly;
-    existing->rawJson = raw;
-    existing->sid = sid;
-    existing->id = id;
-    existing->originMac = info.originMac;
-  }
-  else
-  {
-    RemoteKeysEntry ent;
-    ent.id = id;
-    ent.sid = sid;
-    ent.friendly = friendly;
-    ent.ts = info.timestampMs;
-    ent.rawJson = raw;
-    ent.originMac = info.originMac;
-    g_remoteKeys.push_back(ent);
-    pruneRemoteCaches();
-  }
-  logf(1, "[MESH] Cached KEYS_RES for %s (%s)\n", friendly.c_str(), sid.c_str());
-}
 
 void handleMeshEvent(const MeshEventInfo &info)
 {
@@ -253,6 +232,57 @@ void handleMeshEvent(const MeshEventInfo &info)
   if (typeUpper == "KEYS_RES")
   {
     cacheRemoteKeys(info);
+    return;
+  }
+  if (typeUpper == "STATE_REQ")
+  {
+    DynamicJsonDocument doc(128);
+    if (deserializeJson(doc, info.payload) != DeserializationError::Ok)
+      return;
+    String target = doc["t"] | doc["target"] | info.payload;
+    String requester = doc["req"] | doc["r"] | "";
+    if (matchesLocalNode(target))
+      sendMeshStateResponse(6, requester);
+    return;
+  }
+  if (typeUpper == "KEYS_REQ")
+  {
+    DynamicJsonDocument doc(128);
+    if (deserializeJson(doc, info.payload) != DeserializationError::Ok)
+      return;
+    String target = doc["t"] | doc["target"] | info.payload;
+    String requester = doc["req"] | doc["r"] | "";
+    if (matchesLocalNode(target))
+      sendMeshKeysResponse(6, requester);
+    return;
+  }
+  if (typeUpper == "KEY_SET")
+  {
+    DynamicJsonDocument doc(256);
+    if (deserializeJson(doc, info.payload) != DeserializationError::Ok)
+    {
+      logf(1, "[MESH] KEY_SET parse failed from %s payload=%s\n", macFull.c_str(), info.payload.c_str());
+      return;
+    }
+    String sid = doc["sid"] | "";
+    String key = doc["k"] | "";
+    String value = doc["v"] | "";
+    sid.trim();
+    key.trim();
+    if (!sid.length() || !key.length())
+      return;
+    if (!matchesLocalNode(sid))
+      return;
+    String validation = validateKey(key, value);
+    if (validation != "1")
+    {
+      logf(1, "[MESH] KEY_SET rejected (%s) from %s: %s=%s\n", validation.c_str(), macFull.c_str(), key.c_str(), value.c_str());
+      return;
+    }
+    prefs.putString(key.c_str(), value);
+    SetPublicVariablesFromPrefs();
+    logf(1, "[MESH] Applied KEY_SET from %s (%s): %s=%s\n", labeledName.c_str(), macFull.c_str(), key.c_str(), value.c_str());
+    sendMeshKeysResponse(6, macFull);
     return;
   }
   if (payloadTrim.startsWith("GAS 0"))
@@ -478,8 +508,6 @@ String smsSendRespBuf = "";
 // ===================== Web Server / Preferences =====================
 
 AsyncWebServer server(80);
-Preferences prefs;
-Preferences prefsClock;
 
 void ApplyClockFromMs(uint64_t timestampMs, bool broadcastMesh)
 {
@@ -568,6 +596,104 @@ ConfigKey defaultKeys[] = {
 };
 
 const int numKeys = sizeof(defaultKeys) / sizeof(defaultKeys[0]);
+
+void cacheRemoteKeys(const MeshEventInfo &info)
+{
+  DynamicJsonDocument doc(1024);
+  if (deserializeJson(doc, info.payload) != DeserializationError::Ok)
+  {
+    logf(1, "[MESH] KEYS_RES parse failed from %s payload=%s\n", formatMacFull(info.originMac).c_str(), info.payload.c_str());
+    return;
+  }
+  String req = doc["r"] | doc["req"] | "";
+  if (req.length() && !matchesLocalRequester(req))
+  {
+    logf(1, "[MESH] KEYS_RES ignored (not for me) from %s req=%s\n", formatMacFull(info.originMac).c_str(), req.c_str());
+    return;
+  }
+  String sid = doc["sid"] | doc["s"] | doc["id"] | doc["i"] | formatMacShort(info.originMac);
+  String id = doc["id"] | doc["i"] | sid;
+  String friendly = doc["node"] | info.originNode;
+
+  RemoteKeysEntry *existing = findRemoteKeys(sid, info.originMac);
+  if (!existing)
+  {
+    RemoteKeysEntry ent;
+    ent.id = id;
+    ent.sid = sid;
+    ent.friendly = friendly;
+    ent.ts = info.timestampMs;
+    ent.rawJson = "";
+    ent.originMac = info.originMac;
+    g_remoteKeys.push_back(ent);
+    pruneRemoteCaches();
+    existing = &g_remoteKeys.back();
+  }
+
+  DynamicJsonDocument acc(2048);
+  if (existing->rawJson.length() && deserializeJson(acc, existing->rawJson) != DeserializationError::Ok)
+  {
+    acc.clear();
+  }
+  acc["sid"] = sid;
+  acc["id"] = id;
+  acc["node"] = friendly;
+  acc["req"] = req;
+  JsonArray keysArr;
+  if (acc.containsKey("keys") && acc["keys"].is<JsonArray>())
+    keysArr = acc["keys"].as<JsonArray>();
+  else
+    keysArr = acc.createNestedArray("keys");
+
+  int p = doc["p"] | -1;
+  if (p >= 0 && p < (int)numKeys)
+  {
+    const auto &dk = defaultKeys[p];
+    String kname = dk.key;
+    String kval = doc["v"] | "";
+    bool replaced = false;
+    for (JsonObject existing : keysArr)
+    {
+      String exk = existing["key"] | "";
+      if (exk == kname)
+      {
+        existing["value"] = kval;
+        existing["type"] = dk.type;
+        existing["min"] = dk.min;
+        existing["max"] = dk.max;
+        existing["options"] = dk.options;
+        existing["isSystem"] = dk.isSystem;
+        existing["title"] = dk.title;
+        existing["defaultVal"] = dk.defaultVal;
+        replaced = true;
+        break;
+      }
+    }
+    if (!replaced)
+    {
+      JsonObject o = keysArr.createNestedObject();
+      o["key"] = kname;
+      o["value"] = kval;
+      o["type"] = dk.type;
+      o["min"] = dk.min;
+      o["max"] = dk.max;
+      o["options"] = dk.options;
+      o["isSystem"] = dk.isSystem;
+      o["title"] = dk.title;
+      o["defaultVal"] = dk.defaultVal;
+    }
+  }
+
+  existing->ts = info.timestampMs;
+  existing->friendly = friendly;
+  existing->sid = sid;
+  existing->id = id;
+  existing->originMac = info.originMac;
+  existing->rawJson = "";
+  serializeJson(acc, existing->rawJson);
+
+  logf(1, "[MESH] Cached KEYS_RES for %s (%s) keys=%u\n", friendly.c_str(), sid.c_str(), keysArr.size());
+}
 
 // ===================== HTML =====================
 
@@ -664,6 +790,91 @@ String validateKey(const String &key, const String &value)
     }
   }
   return "                       ";
+}
+
+// ---- Mesh helpers for addressing + responses ----
+bool matchesLocalNode(const String &target)
+{
+  String t = target;
+  t.trim();
+  if (!t.length())
+    return false;
+  t.toUpperCase();
+  String shortId = MeshNet_GetLocalNodeId();
+  shortId.toUpperCase();
+  String macShort = formatMacShort(ESP.getEfuseMac());
+  macShort.toUpperCase();
+  String macFull = formatMacFull(ESP.getEfuseMac());
+  macFull.toUpperCase();
+  String macCompact = formatMacCompact(ESP.getEfuseMac());
+  macCompact.toUpperCase();
+  String friendly = deviceName.length() ? deviceName : shortId;
+  friendly.toUpperCase();
+  return t == shortId || t == macShort || t == macFull || t == macCompact || t == friendly;
+}
+
+bool matchesLocalRequester(const String &req)
+{
+  String r = req;
+  r.trim();
+  if (!r.length())
+    return false;
+  r.toUpperCase();
+  String macFull = formatMacFull(ESP.getEfuseMac());
+  String macShort = formatMacShort(ESP.getEfuseMac());
+  macFull.toUpperCase();
+  macShort.toUpperCase();
+  return r == macFull || r == macShort;
+}
+
+void sendMeshStateResponse(uint8_t ttl, const String &requesterMac)
+{
+  DynamicJsonDocument doc(192);
+  String shortId = MeshNet_GetLocalNodeId();
+  String fullId = formatMacFull(ESP.getEfuseMac());
+  doc["s"] = shortId;       // sid کوتاه
+  doc["i"] = fullId;        // mac کامل
+  doc["r"] = requesterMac;  // requester
+  doc["t"] = DeviceNowMs(); // time
+  // گروه‌بندی وضعیت‌ها در دو بیت‌فیلد (برای کوتاه شدن)
+  uint16_t flags = 0;
+  flags |= public_SystemStatus ? 1 << 0 : 0;
+  flags |= public_PirEnabled ? 1 << 1 : 0;
+  flags |= public_VibEnabled ? 1 << 2 : 0;
+  flags |= public_GasEnabled ? 1 << 3 : 0;
+  flags |= public_WifiEnabled ? 1 << 4 : 0;
+  flags |= public_SmsTxEnabled ? 1 << 5 : 0;
+  flags |= public_AlertEnabled_Buzzer ? 1 << 6 : 0;
+  flags |= public_LedEnabled ? 1 << 7 : 0;
+  doc["f"] = flags;
+  String payload;
+  serializeJson(doc, payload);
+  if (payload.length() > 150)
+    return;
+  MeshNet_RecordNetworkEvent("STATE_RES", payload, false, false, ttl, DeviceNowMs());
+}
+
+void sendMeshKeysResponse(uint8_t ttl, const String &requesterMac)
+{
+  // هر پیام فقط یک کلید با فیلدهای کدگذاری‌شده بر اساس اندکس
+  String s = MeshNet_GetLocalNodeId();
+  String i = formatMacFull(ESP.getEfuseMac());
+  for (int idx = 0; idx < numKeys; ++idx)
+  {
+    DynamicJsonDocument doc(256);
+    doc["s"] = s;              // sid
+    doc["i"] = i;              // id (mac)
+    doc["r"] = requesterMac;   // requester
+    doc["p"] = idx;            // index (code)
+    doc["tot"] = numKeys;      // total keys
+    const auto &dk = defaultKeys[idx];
+    doc["v"] = prefs.getString(dk.key.c_str(), dk.defaultVal);
+    String payload;
+    serializeJson(doc, payload);
+    if (payload.length() > 150)
+      continue;
+    MeshNet_RecordNetworkEvent("KEYS_RES", payload, false, false, ttl, DeviceNowMs());
+  }
 }
 
 // ===================== SMS LOG (Archive 200) =====================
@@ -1085,7 +1296,11 @@ void HtmlFunctions()
     String nodeId = json["nodeId"] | "";
     nodeId.trim();
     if (!nodeId.length()) { request->send(400,"application/json","{\"error\":\"nodeId required\"}"); return; }
-    MeshNet_RecordNetworkEvent("STATE_REQ", nodeId, false, false, 8, DeviceNowMs());
+    DynamicJsonDocument doc(128);
+    doc["t"] = nodeId;
+    doc["req"] = MeshNet_GetLocalMacStr();
+    String payload; serializeJson(doc, payload);
+    MeshNet_RecordNetworkEvent("STATE_REQ", payload, false, false, 8, DeviceNowMs());
     request->send(200, "application/json", "{\"success\":true}"); }));
 
   server.addHandler(new AsyncCallbackJsonWebHandler("/api/mesh/requestKeys", [](AsyncWebServerRequest *request, JsonVariant &json)
@@ -1095,7 +1310,11 @@ void HtmlFunctions()
     String nodeId = json["nodeId"] | "";
     nodeId.trim();
     if (!nodeId.length()) { request->send(400,"application/json","{\"error\":\"nodeId required\"}"); return; }
-    MeshNet_RecordNetworkEvent("KEYS_REQ", nodeId, false, false, 8, DeviceNowMs());
+    DynamicJsonDocument doc(128);
+    doc["t"] = nodeId;
+    doc["req"] = MeshNet_GetLocalMacStr();
+    String payload; serializeJson(doc, payload);
+    MeshNet_RecordNetworkEvent("KEYS_REQ", payload, false, false, 8, DeviceNowMs());
     request->send(200, "application/json", "{\"success\":true}"); }));
 
   server.addHandler(new AsyncCallbackJsonWebHandler("/api/mesh/saveRemote", [](AsyncWebServerRequest *request, JsonVariant &json)
@@ -1108,6 +1327,7 @@ void HtmlFunctions()
     nodeId.trim(); key.trim();
     if (!nodeId.length() || !key.length()) { request->send(400,"application/json","{\"error\":\"nodeId and key required\"}"); return; }
     DynamicJsonDocument doc(256);
+    doc["sid"] = nodeId;
     doc["k"] = key;
     doc["v"] = value;
     String payload;

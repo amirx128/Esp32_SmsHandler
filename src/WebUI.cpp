@@ -199,6 +199,7 @@ let TOKEN = null;
 let meshState = {nodes:[], events:[], states:[]};
 let currentNodeId = null;
 let currentNodeName = null;
+let isEditing = false;
 
 function $(id){ return document.getElementById(id); }
 
@@ -304,12 +305,12 @@ async function afterLogin(preloaded){
   await loadMem();
   if (typeof loadGas === 'function') await loadGas();
   if (typeof loadDht === 'function') await loadDht();
-  setInterval(loadSmsLog, 3000);
-  setInterval(loadInboxLog, 5000);
-  setInterval(loadMeshState, 5000);
-  setInterval(loadMem, 10000);
-  if (typeof loadGas === 'function') setInterval(loadGas, 2000);
-  if (typeof loadDht === 'function') setInterval(loadDht, 2000);
+  setInterval(loadSmsLog, 6000);
+  setInterval(loadInboxLog, 8000);
+  setInterval(loadMeshState, 10000);
+  setInterval(loadMem, 12000);
+  if (typeof loadGas === 'function') setInterval(loadGas, 4000);
+  if (typeof loadDht === 'function') setInterval(loadDht, 4000);
 }
 
 function logout(){
@@ -346,13 +347,13 @@ async function loadKeys(){
 function inputFor(k){
   const val = k.value || '';
   if (k.type==='dropdown' || k.type==='bool'){
-    return `<select id="i-${k.key}">${k.options.split(',').map(o=>`<option value="${o}" ${val===o?'selected':''}>${o}</option>`).join('')}</select>`;
+    return `<select id="i-${k.key}" onfocus="isEditing=true" onblur="isEditing=false">${k.options.split(',').map(o=>`<option value="${o}" ${val===o?'selected':''}>${o}</option>`).join('')}</select>`;
   }else if (k.type==='mobile'){
-    return `<input class="mobile-input" id="i-${k.key}" value="${val}" maxlength="11" placeholder="09121234567"/>`;
+    return `<input class="mobile-input" id="i-${k.key}" value="${val}" maxlength="11" placeholder="09121234567" onfocus="isEditing=true" onblur="isEditing=false"/>`;
   }else if (k.type==='int'){
-    return `<input type="number" id="i-${k.key}" value="${val}" min="${k.min}" max="${k.max}"/>`;
+    return `<input type="number" id="i-${k.key}" value="${val}" min="${k.min}" max="${k.max}" onfocus="isEditing=true" onblur="isEditing=false"/>`;
   }else{
-    return `<input type="text" id="i-${k.key}" value="${val}" maxlength="${k.max||''}" placeholder="min ${k.min} chars"/>`;
+    return `<input type="text" id="i-${k.key}" value="${val}" maxlength="${k.max||''}" placeholder="min ${k.min} chars" onfocus="isEditing=true" onblur="isEditing=false"/>`;
   }
 }
 
@@ -616,7 +617,7 @@ async function loadMeshState(){
       applied = true;
     }
   }
-  if (applied) render();
+  if (applied && !isEditing) render();
   const tb = $('mesh-nodes-body');
   if (tb){
     tb.innerHTML = '';

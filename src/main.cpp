@@ -1,4 +1,4 @@
-﻿#include <AsyncJson.h>
+#include <AsyncJson.h>
 #include <Arduino.h>
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
@@ -39,6 +39,18 @@ void sendMeshKeysResponse(uint8_t ttl = 6, const String &requesterMac = "");
 String validateKey(const String &key, const String &value);
 bool matchesLocalRequester(const String &req);
 extern const int numKeys;
+struct ConfigKey
+{
+  String key;
+  String title; // caption (fa-IR)
+  String type;  // string, int, bool, dropdown, mobile
+  String defaultVal;
+  String min;
+  String max;
+  String options; // dropdown options
+  bool isSystem;
+};
+extern ConfigKey defaultKeys[];
 
 String formatMacFull(uint64_t mac)
 {
@@ -141,6 +153,7 @@ void pruneRemoteCaches()
 }
 
 void cacheRemoteKeys(const MeshEventInfo &info);
+void cacheRemoteData(const MeshEventInfo &info, const char *kind);
 
 void cacheRemoteState(const MeshEventInfo &info)
 {
@@ -234,6 +247,11 @@ void handleMeshEvent(const MeshEventInfo &info)
     cacheRemoteKeys(info);
     return;
   }
+  if (typeUpper == "BOOLDATA" || typeUpper == "INTDATA" || typeUpper == "STRDATA")
+  {
+    cacheRemoteData(info, typeUpper.c_str());
+    return;
+  }
   if (typeUpper == "STATE_REQ")
   {
     DynamicJsonDocument doc(128);
@@ -283,6 +301,31 @@ void handleMeshEvent(const MeshEventInfo &info)
     SetPublicVariablesFromPrefs();
     logf(1, "[MESH] Applied KEY_SET from %s (%s): %s=%s\n", labeledName.c_str(), macFull.c_str(), key.c_str(), value.c_str());
     sendMeshKeysResponse(6, macFull);
+    return;
+  }
+  if (typeUpper == "KEY_IDX")
+  {
+    DynamicJsonDocument doc(256);
+    if (deserializeJson(doc, info.payload) != DeserializationError::Ok)
+      return;
+    String target = doc["t"] | doc["target"] | "";
+    if (!matchesLocalNode(target))
+      return;
+    int idx = doc["p"] | -1;
+    String val = doc["v"] | "";
+    if (idx < 0 || idx >= numKeys)
+      return;
+    const auto &dk = defaultKeys[idx];
+    String validation = validateKey(dk.key, val);
+    if (validation != "1")
+    {
+      logf(1, "[MESH] KEY_IDX rejected (%s) idx=%d key=%s\n", validation.c_str(), idx, dk.key.c_str());
+      return;
+    }
+    prefs.putString(dk.key.c_str(), val);
+    SetPublicVariablesFromPrefs();
+    logf(1, "[MESH] Applied KEY_IDX: %s=%s\n", dk.key.c_str(), val.c_str());
+    sendMeshKeysResponse(6, formatMacFull(info.originMac));
     return;
   }
   if (payloadTrim.startsWith("GAS 0"))
@@ -541,18 +584,6 @@ String deviceName;
 
 // ===================== Config Keys =====================
 
-struct ConfigKey
-{
-  String key;
-  String title; // caption (fa-IR)
-  String type; // string, int, bool, dropdown, mobile
-  String defaultVal;
-  String min;
-  String max;
-  String options; //          dropdown: "on,off"
-  bool isSystem;
-};
-
 //                           :                                                    +                                    
 ConfigKey defaultKeys[] = {
     {"wifi_Ssid_Name",   "??? ???? ?? (SSID)",     "string", ssidNameDefault,      "2",  "32",  "",            false},
@@ -630,7 +661,7 @@ void cacheRemoteKeys(const MeshEventInfo &info)
     existing = &g_remoteKeys.back();
   }
 
-  DynamicJsonDocument acc(2048);
+  DynamicJsonDocument acc(8192);
   if (existing->rawJson.length() && deserializeJson(acc, existing->rawJson) != DeserializationError::Ok)
   {
     acc.clear();
@@ -640,10 +671,33 @@ void cacheRemoteKeys(const MeshEventInfo &info)
   acc["node"] = friendly;
   acc["req"] = req;
   JsonArray keysArr;
+  bool rebuild = true;
   if (acc.containsKey("keys") && acc["keys"].is<JsonArray>())
+  {
     keysArr = acc["keys"].as<JsonArray>();
-  else
+    if (keysArr.size() == (size_t)numKeys)
+      rebuild = false;
+  }
+  if (rebuild)
+  {
+    acc.remove("keys");
     keysArr = acc.createNestedArray("keys");
+    for (int j = 0; j < numKeys; ++j)
+    {
+      const auto &dk = defaultKeys[j];
+      JsonObject o = keysArr.createNestedObject();
+      o["key"] = dk.key;
+      o["value"] = dk.defaultVal;
+      o["type"] = dk.type;
+      o["min"] = dk.min;
+      o["max"] = dk.max;
+      o["options"] = dk.options;
+      o["isSystem"] = dk.isSystem;
+      o["title"] = dk.title;
+      o["defaultVal"] = dk.defaultVal;
+      o["idx"] = j;
+    }
+  }
 
   int p = doc["p"] | -1;
   if (p >= 0 && p < (int)numKeys)
@@ -665,6 +719,7 @@ void cacheRemoteKeys(const MeshEventInfo &info)
         existing["isSystem"] = dk.isSystem;
         existing["title"] = dk.title;
         existing["defaultVal"] = dk.defaultVal;
+        existing["idx"] = p;
         replaced = true;
         break;
       }
@@ -681,6 +736,7 @@ void cacheRemoteKeys(const MeshEventInfo &info)
       o["isSystem"] = dk.isSystem;
       o["title"] = dk.title;
       o["defaultVal"] = dk.defaultVal;
+      o["idx"] = p;
     }
   }
 
@@ -693,6 +749,147 @@ void cacheRemoteKeys(const MeshEventInfo &info)
   serializeJson(acc, existing->rawJson);
 
   logf(1, "[MESH] Cached KEYS_RES for %s (%s) keys=%u\n", friendly.c_str(), sid.c_str(), keysArr.size());
+}
+
+// ????????? ???????? ????? boolData/intData/strData (???? = ????? defaultKeys)
+void cacheRemoteData(const MeshEventInfo &info, const char *kind)
+{
+  DynamicJsonDocument doc(512);
+  if (deserializeJson(doc, info.payload) != DeserializationError::Ok)
+    return;
+  String req = doc["r"] | doc["req"] | "";
+  if (req.length() && !matchesLocalRequester(req))
+    return;
+
+  String sid = doc["src"] | doc["s"] | doc["i"] | formatMacShort(info.originMac);
+  String id = sid;
+  String friendly = doc["node"] | info.originNode;
+
+  RemoteKeysEntry *existing = findRemoteKeys(sid, info.originMac);
+  if (!existing)
+  {
+    RemoteKeysEntry ent;
+    ent.id = id;
+    ent.sid = sid;
+    ent.friendly = friendly;
+    ent.ts = info.timestampMs;
+    ent.rawJson = "";
+    ent.originMac = info.originMac;
+    g_remoteKeys.push_back(ent);
+    pruneRemoteCaches();
+    existing = &g_remoteKeys.back();
+  }
+
+  DynamicJsonDocument acc(8192);
+  if (existing->rawJson.length() && deserializeJson(acc, existing->rawJson) != DeserializationError::Ok)
+    acc.clear();
+
+  acc["sid"] = sid;
+  acc["id"] = id;
+  acc["node"] = friendly;
+  acc["req"] = req;
+
+  JsonArray keysArr;
+  bool rebuild = true;
+  if (acc.containsKey("keys") && acc["keys"].is<JsonArray>())
+  {
+    keysArr = acc["keys"].as<JsonArray>();
+    if (keysArr.size() == (size_t)numKeys)
+      rebuild = false;
+  }
+  if (rebuild)
+  {
+    acc.remove("keys");
+    keysArr = acc.createNestedArray("keys");
+    for (int j = 0; j < numKeys; ++j)
+    {
+      const auto &dk = defaultKeys[j];
+      JsonObject o = keysArr.createNestedObject();
+      o["key"] = dk.key;
+      o["value"] = dk.defaultVal;
+      o["type"] = dk.type;
+      o["min"] = dk.min;
+      o["max"] = dk.max;
+      o["options"] = dk.options;
+      o["isSystem"] = dk.isSystem;
+      o["idx"] = j;
+    }
+  }
+
+  JsonObject data = doc["data"].as<JsonObject>();
+  for (JsonPair kv : data)
+  {
+    int idx = String(kv.key().c_str()).toInt();
+    if (idx < 0 || idx >= numKeys)
+      continue;
+    const auto &dk = defaultKeys[idx];
+    String kname = dk.key;
+    String ktype = dk.type;
+
+    String newVal;
+    if (strcasecmp(kind, "BOOLDATA") == 0)
+    {
+      int v = kv.value().as<int>();
+      newVal = v ? "true" : "false";
+    }
+    else if (strcasecmp(kind, "INTDATA") == 0)
+    {
+      String v = kv.value().as<String>();
+      int dash1 = v.indexOf('-');
+      int dash2 = v.indexOf('-', dash1 + 1);
+      String cur = v;
+      if (dash1 > 0 && dash2 > dash1)
+      {
+        cur = v.substring(0, dash1);
+        // min/max ????? ??? ??? ???? ????? ??? ????? ???? ???? ???? ?????? min/max ???? defaultKeys ?????
+      }
+      newVal = cur;
+    }
+    else
+    {
+      newVal = kv.value().as<String>();
+    }
+
+    bool replaced = false;
+    for (JsonObject existingObj : keysArr)
+    {
+      String exk = existingObj["key"] | "";
+      if (exk == kname)
+      {
+        existingObj["value"] = newVal;
+        existingObj["type"] = ktype;
+        existingObj["min"] = dk.min;
+        existingObj["max"] = dk.max;
+        existingObj["options"] = dk.options;
+        existingObj["isSystem"] = dk.isSystem;
+        existingObj["idx"] = idx;
+        replaced = true;
+        break;
+      }
+    }
+    if (!replaced)
+    {
+      JsonObject o = keysArr.createNestedObject();
+      o["key"] = kname;
+      o["value"] = newVal;
+      o["type"] = ktype;
+      o["min"] = dk.min;
+      o["max"] = dk.max;
+      o["options"] = dk.options;
+      o["isSystem"] = dk.isSystem;
+      o["idx"] = idx;
+    }
+  }
+
+  existing->ts = info.timestampMs;
+  existing->friendly = friendly;
+  existing->sid = sid;
+  existing->id = id;
+  existing->originMac = info.originMac;
+  existing->rawJson = "";
+  serializeJson(acc, existing->rawJson);
+
+  logf(1, "[MESH] Cached %s for %s (%s) keys=%u\n", kind, friendly.c_str(), sid.c_str(), keysArr.size());
 }
 
 // ===================== HTML =====================
@@ -832,11 +1029,11 @@ void sendMeshStateResponse(uint8_t ttl, const String &requesterMac)
   DynamicJsonDocument doc(192);
   String shortId = MeshNet_GetLocalNodeId();
   String fullId = formatMacFull(ESP.getEfuseMac());
-  doc["s"] = shortId;       // sid کوتاه
-  doc["i"] = fullId;        // mac کامل
+  doc["s"] = shortId;       // sid ?????
+  doc["i"] = fullId;        // mac ????
   doc["r"] = requesterMac;  // requester
   doc["t"] = DeviceNowMs(); // time
-  // گروه‌بندی وضعیت‌ها در دو بیت‌فیلد (برای کوتاه شدن)
+  // ????????? ???????? ?? ?? ???????? (???? ????? ???)
   uint16_t flags = 0;
   flags |= public_SystemStatus ? 1 << 0 : 0;
   flags |= public_PirEnabled ? 1 << 1 : 0;
@@ -856,24 +1053,107 @@ void sendMeshStateResponse(uint8_t ttl, const String &requesterMac)
 
 void sendMeshKeysResponse(uint8_t ttl, const String &requesterMac)
 {
-  // هر پیام فقط یک کلید با فیلدهای کدگذاری‌شده بر اساس اندکس
-  String s = MeshNet_GetLocalNodeId();
-  String i = formatMacFull(ESP.getEfuseMac());
+  // ???? ?? ????: boolData / intData / strData (?? ???? ?? ????)
+  String srcMac = formatMacFull(ESP.getEfuseMac());
+
+  DynamicJsonDocument bdoc(256);
+  bdoc["t"] = "boolData";
+  bdoc["r"] = requesterMac;
+  bdoc["src"] = srcMac;
+  JsonObject bdata = bdoc.createNestedObject("data");
+
+  DynamicJsonDocument idoc(384);
+  idoc["t"] = "intData";
+  idoc["r"] = requesterMac;
+  idoc["src"] = srcMac;
+  JsonObject idata = idoc.createNestedObject("data");
+
+  DynamicJsonDocument sdoc(384);
+  sdoc["t"] = "strData";
+  sdoc["r"] = requesterMac;
+  sdoc["src"] = srcMac;
+  JsonObject sdata = sdoc.createNestedObject("data");
+
   for (int idx = 0; idx < numKeys; ++idx)
   {
-    DynamicJsonDocument doc(256);
-    doc["s"] = s;              // sid
-    doc["i"] = i;              // id (mac)
-    doc["r"] = requesterMac;   // requester
-    doc["p"] = idx;            // index (code)
-    doc["tot"] = numKeys;      // total keys
     const auto &dk = defaultKeys[idx];
-    doc["v"] = prefs.getString(dk.key.c_str(), dk.defaultVal);
+    String val = prefs.getString(dk.key.c_str(), dk.defaultVal);
+    if (dk.type == "bool")
+    {
+      bdata[String(idx)] = (val == "true" || val == "1") ? 1 : 0;
+    }
+    else if (dk.type == "int")
+    {
+      String cur = val.length() ? val : dk.defaultVal;
+      String mn = dk.min;
+      String mx = dk.max;
+      idata[String(idx)] = cur + "-" + mn + "-" + mx; // current-min-max
+    }
+    else
+    {
+      sdata[String(idx)] = val;
+    }
+  }
+
+  auto sendDoc = [&](DynamicJsonDocument &doc, const char *label) -> bool
+  {
     String payload;
     serializeJson(doc, payload);
-    if (payload.length() > 150)
-      continue;
-    MeshNet_RecordNetworkEvent("KEYS_RES", payload, false, false, ttl, DeviceNowMs());
+    if (payload.length() > 200)
+    {
+      logf(1, "[MESH] %s payload too large (%u)\n", label, (unsigned)payload.length());
+      return false;
+    }
+    MeshNet_RecordNetworkEvent(label, payload, false, false, ttl, DeviceNowMs());
+    return true;
+  };
+
+  // اگر پکت بزرگ شد، برای هر entry جدا بفرست
+  if (!sendDoc(bdoc, "boolData"))
+  {
+    for (JsonPair kv : bdata)
+    {
+      DynamicJsonDocument d(128);
+      d["t"] = "boolData";
+      d["r"] = requesterMac;
+      d["src"] = srcMac;
+      JsonObject dd = d.createNestedObject("data");
+      dd[kv.key()] = kv.value();
+      sendDoc(d, "boolData");
+      delay(2);
+    }
+  }
+  delay(3);
+
+  if (!sendDoc(idoc, "intData"))
+  {
+    for (JsonPair kv : idata)
+    {
+      DynamicJsonDocument d(192);
+      d["t"] = "intData";
+      d["r"] = requesterMac;
+      d["src"] = srcMac;
+      JsonObject dd = d.createNestedObject("data");
+      dd[kv.key()] = kv.value();
+      sendDoc(d, "intData");
+      delay(2);
+    }
+  }
+  delay(3);
+
+  if (!sendDoc(sdoc, "strData"))
+  {
+    for (JsonPair kv : sdata)
+    {
+      DynamicJsonDocument d(192);
+      d["t"] = "strData";
+      d["r"] = requesterMac;
+      d["src"] = srcMac;
+      JsonObject dd = d.createNestedObject("data");
+      dd[kv.key()] = kv.value();
+      sendDoc(d, "strData");
+      delay(2);
+    }
   }
 }
 
@@ -1246,7 +1526,7 @@ void HtmlFunctions()
       obj["ts"] = (uint64_t)k.ts;
       if (k.rawJson.length())
       {
-        DynamicJsonDocument tmp(2048);
+        DynamicJsonDocument tmp(8192);
         if (deserializeJson(tmp, k.rawJson) == DeserializationError::Ok)
           obj["raw"] = tmp.as<JsonVariant>();
         else
@@ -2952,9 +3232,10 @@ void SetPublicVariablesFromPrefs()
   // SoftAP SSID per node
   String trimmedSsid = ssidName;
   trimmedSsid.trim();
-  if (trimmedSsid.length() < 4)
+  // اگر خالی یا همان مقدار پیش‌فرض قدیمی بود، با مک مقداردهی کن
+  if (trimmedSsid.length() < 4 || trimmedSsid == ssidNameDefault)
   {
-    trimmedSsid = String("elix_Node_") + formatMacShort(mac);
+    trimmedSsid = String("ElixMesh_") + formatMacCompact(mac);
     prefs.putString("wifi_Ssid_Name", trimmedSsid);
   }
   ssidName = trimmedSsid;
@@ -3100,6 +3381,7 @@ void loop()
   //                                           (                     )
   SetAllarmState();
 }
+
 
 
 

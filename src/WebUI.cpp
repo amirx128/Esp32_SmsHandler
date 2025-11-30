@@ -47,7 +47,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     <h2>System Login</h2>
     <input type="text" id="user" placeholder="Username" />
     <input type="password" id="pass" placeholder="Password" />
-    <button type="button" onclick="login()">Login</button>
+    <button type="button" id="loginBtn">Login</button>
     <p class="error" id="err"></p>
   </div>
 </div>
@@ -200,6 +200,7 @@ let meshState = {nodes:[], events:[], states:[]};
 let currentNodeId = null;
 let currentNodeName = null;
 let isEditing = false;
+let lastMeshAutoFetch = 0;
 
 function $(id){ return document.getElementById(id); }
 
@@ -253,18 +254,24 @@ async function api(path, data=null){
 }
 
 async function login(){
+
+  console.log('[WEB] login start..... ');
   const userEl = $('user'), passEl = $('pass');
+
   if (!userEl || !passEl){ alert('Login error: input elements not found'); return; }
   const user = userEl.value.trim();
   const pass = passEl.value;
   if (!user || !pass){ $('err').textContent = '                                       '; return; }
 
+  console.log('[WEB] login start user=', user);
   const res = await api('/login', { user, pass });
   if (res.success){
+    console.log('[WEB] login success user=', user);
     TOKEN = res.token;
     localStorage.setItem('TOKEN', TOKEN);
     await afterLogin();
   }else{
+    console.warn('[WEB] login failed user=', user, 'err=', res.error);
     $('err').textContent = res.error || 'Invalid username or password';
   }
 }
@@ -322,7 +329,9 @@ function logout(){
   localStorage.removeItem('TOKEN');
 }
 
-// Expose handlers for inline onclick usage
+// Hook buttons & expose handlers
+const loginBtn = document.getElementById('loginBtn');
+if (loginBtn) loginBtn.onclick = login;
 window.login = login;
 window.logout = logout;
 
@@ -545,8 +554,25 @@ async function loadDht(){
 }
 
 async function loadMeshState(){
+  console.log('[WEB] loadMeshState start');
   const data = await api('/mesh/state');
-  if (!data || !data.nodes) return;
+  if (!data || !data.nodes){ console.warn('[WEB] loadMeshState empty/invalid', data); return; }
+  console.log('[WEB] loadMeshState got', (data.nodes||[]).length, 'nodes', (data.keys||[]).length, 'keys');
+
+  // اگر کلید/استیت نداریم و نود غیرلوکال داریم، خودکار درخواست بفرست
+  if (((data.keys||[]).length === 0 || (data.states||[]).length === 0) && (data.nodes||[]).some(n => !n.local)) {
+    const now = Date.now();
+    if (now - lastMeshAutoFetch > 1500) {
+      console.log('[WEB] auto mesh fetch: no keys/states yet, requesting all remote nodes');
+      (data.nodes||[]).filter(n => !n.local).forEach(n => {
+        api('/mesh/requestState', { nodeId: n.id });
+        api('/mesh/requestKeys', { nodeId: n.id });
+      });
+      lastMeshAutoFetch = now;
+      setTimeout(loadMeshState, 1500);
+    }
+  }
+
   meshState = data;
    // Update current node name label
   const label = $('nodeNameLabel');
@@ -704,7 +730,7 @@ function openModal(id){
   el.classList.remove('hidden');
   if (id === 'gasModal' && typeof loadGas === 'function') loadGas();
   if (id === 'dhtModal' && typeof loadDht === 'function') loadDht();
-  if (id === 'nodesModal') loadMeshState && loadMeshState();
+  if (id === 'nodesModal'){ console.log('[WEB] nodesModal open -> fetch mesh state'); loadMeshState && loadMeshState(); }
   if (id === 'smsModal') loadSmsLog && loadSmsLog();
   if (id === 'inboxModal') loadInboxLog && loadInboxLog();
   if (id === 'memModal') loadMem();

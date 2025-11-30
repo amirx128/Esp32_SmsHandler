@@ -1042,8 +1042,12 @@ void MeshNet_SerializeNodes(JsonArray arr)
 
 void MeshNet_SerializeEvents(JsonArray arr)
 {
-  for (const auto &entry : g_history)
+  // برای جلوگیری از پر شدن حافظه JSON، فقط آخرین 200 رو می‌فرستیم (جدید به قدیم)
+  const size_t kMaxExpose = 200;
+  size_t count = 0;
+  for (auto it = g_history.rbegin(); it != g_history.rend() && count < kMaxExpose; ++it, ++count)
   {
+    const auto &entry = *it;
     JsonObject obj = arr.createNestedObject();
     obj["id"] = entry.originNode + "-" + String(entry.messageId, HEX);
     obj["origin"] = entry.originNode;

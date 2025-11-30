@@ -560,18 +560,7 @@ async function loadMeshState(){
   console.log('[WEB] loadMeshState got', (data.nodes||[]).length, 'nodes', (data.keys||[]).length, 'keys');
 
   // اگر کلید/استیت نداریم و نود غیرلوکال داریم، خودکار درخواست بفرست
-  if (((data.keys||[]).length === 0 || (data.states||[]).length === 0) && (data.nodes||[]).some(n => !n.local)) {
-    const now = Date.now();
-    if (now - lastMeshAutoFetch > 1500) {
-      console.log('[WEB] auto mesh fetch: no keys/states yet, requesting all remote nodes');
-      (data.nodes||[]).filter(n => !n.local).forEach(n => {
-        api('/mesh/requestState', { nodeId: n.id });
-        api('/mesh/requestKeys', { nodeId: n.id });
-      });
-      lastMeshAutoFetch = now;
-      setTimeout(loadMeshState, 1500);
-    }
-  }
+  // Auto mesh fetch disabled; user must click Fetch State for remote nodes
 
   meshState = data;
    // Update current node name label

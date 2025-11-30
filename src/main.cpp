@@ -1615,6 +1615,45 @@ void HtmlFunctions()
       logf(1, "[API] /mesh/state -> empty payload sent\n");
     } });
 
+  // salam: endpoint sabok faghat keys cache shode ra bar mi-gardand (bedone nodes/events/states)
+  server.on("/api/mesh/keys", HTTP_GET, [](AsyncWebServerRequest *req)
+            {
+    if (!authenticateWeb(req)) { req->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
+    String target = "";
+    if (req->hasParam("id"))
+    {
+      target = req->getParam("id")->value();
+      target.trim();
+    }
+    DynamicJsonDocument doc(16384);
+    JsonArray keysArr = doc.createNestedArray("keys");
+    for (const auto &k : g_remoteKeys)
+    {
+      if (target.length())
+      {
+        if (!k.id.equalsIgnoreCase(target) &&
+            !k.sid.equalsIgnoreCase(target) &&
+            !k.friendly.equalsIgnoreCase(target))
+          continue;
+      }
+      JsonObject obj = keysArr.createNestedObject();
+      obj["id"] = k.id;
+      obj["sid"] = k.sid;
+      obj["friendly"] = k.friendly;
+      obj["ts"] = (uint64_t)k.ts;
+      if (k.rawJson.length())
+      {
+        DynamicJsonDocument tmp(8192);
+        if (deserializeJson(tmp, k.rawJson) == DeserializationError::Ok)
+          obj["raw"] = tmp.as<JsonVariant>();
+        else
+          obj["rawJson"] = k.rawJson;
+      }
+    }
+    doc["success"] = true;
+    String out; serializeJson(doc, out);
+    req->send(200, "application/json", out); });
+
   server.on("/api/mem", HTTP_GET, [](AsyncWebServerRequest *req)
             {
     if (!authenticateWeb(req)) { req->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }

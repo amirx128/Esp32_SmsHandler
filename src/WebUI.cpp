@@ -38,6 +38,9 @@ const char index_html[] PROGMEM = R"rawliteral(
     .modal-content { background:#2d2d2d; padding:20px; border-radius:12px; width:90%; max-width:900px; max-height:90%; overflow:auto; box-shadow:0 10px 25px rgba(0,0,0,0.5); }
     .modal-close { float:right; font-size:1.5rem; cursor:pointer; }
     .btn-row { display:grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap:10px; }
+    .loading { text-align:center; padding:20px; color:#ccc; }
+    .spinner { margin:0 auto 10px; width:32px; height:32px; border:3px solid #555; border-top-color: var(--p); border-radius:50%; animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
@@ -201,6 +204,7 @@ let currentNodeId = null;
 let currentNodeName = null;
 let isEditing = false;
 let lastMeshAutoFetch = 0;
+let keysLoading = false;
 
 function $(id){ return document.getElementById(id); }
 
@@ -350,6 +354,7 @@ async function loadKeys(){
     data.keys.forEach(k => window.keys.push(k));
     populateMeshSettings(window.keys);
     render();
+    keysLoading = false;
   }
 }
 
@@ -370,8 +375,12 @@ function render(){
   const g = $('grid');
   if (!g){ console.warn('         #grid                !'); return; }
   g.innerHTML = '';
+  if (keysLoading){
+    g.innerHTML = '<div class="loading"><div class="spinner"></div><p>Loading keys...</p></div>';
+    return;
+  }
   if (!window.keys || !window.keys.length){
-    g.innerHTML = '<p style="text-align:center;color:#aaa;">No keys loaded. Fetch a node or reload.</p>';
+    g.innerHTML = '<div class="loading"><p>No keys loaded. Fetch a node or reload.</p></div>';
     return;
   }
   window.keys.forEach(k => {
@@ -616,20 +625,10 @@ async function loadMeshState(){
     }
   }
   if (!applied && !window.keys){
-    const rk = (data.keys||[]).find(k =>
-      target === (k.id||'').toUpperCase() ||
-      target === (k.sid||'').toUpperCase() ||
-      target === (k.friendly||'').toUpperCase() ||
-      (k.raw && (
-        target === (k.raw.sid||'').toUpperCase() ||
-        target === (k.raw.id||'').toUpperCase() ||
-        target === (k.raw.friendly||'').toUpperCase()
-      ))
-    );
-    if (rk && rk.raw && rk.raw.keys){
-      window.keys = [];
-      rk.raw.keys.forEach(k => window.keys.push(k));
-      applied = true;
+    // If keys not present, try fetching lightweight keys endpoint
+    if (currentNodeId) {
+      keysLoading = true;
+      setTimeout(()=>loadMeshKeys(currentNodeId), 500);
     }
   }
   if (applied && !isEditing) render();
@@ -661,6 +660,29 @@ async function loadMeshState(){
         tb.appendChild(tr);
       });
     }
+  }
+}
+
+async function loadMeshKeys(nodeId){
+  try{
+    const qs = nodeId ? (`?id=${encodeURIComponent(nodeId)}`) : '';
+    const data = await api('/mesh/keys' + qs);
+    if (data && data.keys && data.keys.length){
+      const rk = nodeId ? data.keys.find(k =>
+        nodeId.toUpperCase() === (k.id||'').toUpperCase() ||
+        nodeId.toUpperCase() === (k.sid||'').toUpperCase() ||
+        nodeId.toUpperCase() === (k.friendly||'').toUpperCase()
+      ) : data.keys[0];
+      if (rk && rk.raw && rk.raw.keys){
+        window.keys = [];
+        rk.raw.keys.forEach(k => window.keys.push(k));
+      }
+    }
+  }catch(e){
+    console.warn('loadMeshKeys error', e);
+  }finally{
+    keysLoading = false;
+    if (!isEditing) render();
   }
 }
 
@@ -698,6 +720,7 @@ async function requestState(nodeId){
   currentNodeName = nodeId;
   closeModal('nodesModal');
   window.keys = [];
+  keysLoading = true;
   render();
   const banner = $('nodeBanner');
   if (banner){
@@ -708,7 +731,9 @@ async function requestState(nodeId){
   await api('/mesh/requestKeys', { nodeId });
   // Wait a bit then reload mesh state to pick new state
   setTimeout(loadMeshState, 1000);
+  setTimeout(()=>loadMeshKeys(nodeId), 1200);
   setTimeout(loadMeshState, 3000);
+  setTimeout(()=>loadMeshKeys(nodeId), 3200);
 }
 
 function closeMeshModal(){ closeModal('meshModal'); }

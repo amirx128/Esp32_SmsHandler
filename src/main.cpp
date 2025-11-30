@@ -1538,7 +1538,32 @@ void HtmlFunctions()
       MeshNet_SerializeNodes(nodes);
       nodeCount = nodes.size();
       JsonArray events = doc.createNestedArray("events");
-      MeshNet_SerializeEvents(events); // محدود به 200 آخر
+      // Only expose local events (skip remote) to keep payload small and avoid overflow
+      const size_t kMaxExposeLocal = 32;
+      size_t countLocal = 0;
+      for (auto it = g_history.rbegin(); it != g_history.rend() && countLocal < kMaxExposeLocal; ++it)
+      {
+        const auto &entry = *it;
+        if (entry.originMac != ESP.getEfuseMac())
+          continue;
+        JsonObject obj = events.createNestedObject();
+        obj["id"] = entry.originNode + "-" + String(entry.messageId, HEX);
+        obj["origin"] = entry.originNode;
+        obj["originId"] = entry.originShortId;
+        obj["originMac"] = formatMacString(entry.originMac);
+        obj["type"] = entry.type;
+        obj["payload"] = entry.payload;
+        obj["ts"] = (uint64_t)entry.timestampMs;
+        obj["requiresSms"] = entry.requiresSms;
+        obj["requiresSiren"] = entry.requiresSiren;
+        obj["ttl"] = entry.initialTtl;
+        obj["expectedAcks"] = entry.expectedAckCount;
+        obj["delivered"] = entry.delivered;
+        JsonArray ackArr = obj.createNestedArray("acks");
+        for (const auto &name : entry.ackedBy)
+          ackArr.add(name);
+        ++countLocal;
+      }
       eventCount = events.size();
       JsonArray states = doc.createNestedArray("states");
       for (const auto &st : g_remoteStates)

@@ -376,7 +376,7 @@ function render(){
   const g = $('grid');
   if (!g){ console.warn('         #grid                !'); return; }
   g.innerHTML = '';
-  if (keysLoading){
+  if (keysLoading && (!window.keys || !window.keys.length)){
     g.innerHTML = '<div class="loading"><div class="spinner"></div><p>Loading keys...</p></div>';
     return;
   }
@@ -434,7 +434,7 @@ async function save(key){
   if (currentNodeId){
     res = await api('/mesh/saveRemote', {nodeId: currentNodeId, key, value: val});
     // refresh remote keys shortly after save
-    if (keysNodeId !== currentNodeId.toUpperCase()) keysLoading = true;
+    if (keysNodeId !== (currentNodeId || '').toUpperCase()) keysLoading = true;
     setTimeout(()=>loadMeshKeys(currentNodeId), 800);
   }else{
     res = await api('/save', {key, value: val});
@@ -576,9 +576,8 @@ async function loadMeshState(){
   // Auto mesh fetch disabled; user must click Fetch State for remote nodes
 
   meshState = data;
-  // Always try to refresh keys via lightweight endpoint for current remote node
+  // Try to refresh keys via lightweight endpoint for current remote node (بدون تغییر وضعیت لودینگ)
   if (currentNodeId){
-    if (!window.keys || keysNodeId !== currentNodeId.toUpperCase()) keysLoading = true;
     setTimeout(()=>loadMeshKeys(currentNodeId), 300);
   }
    // Update current node name label
@@ -685,6 +684,7 @@ async function loadMeshKeys(nodeId){
       if (rk && rk.raw && rk.raw.keys){
         window.keys = [];
         rk.raw.keys.forEach(k => window.keys.push(k));
+        keysNodeId = nodeId ? nodeId.toUpperCase() : null;
       }
     }
   }catch(e){
@@ -728,8 +728,12 @@ async function requestState(nodeId){
   currentNodeId = nodeId;
   currentNodeName = nodeId;
   closeModal('nodesModal');
-  window.keys = [];
-  keysLoading = true;
+  const prevNode = keysNodeId;
+  const upId = nodeId ? nodeId.toUpperCase() : null;
+  if (!prevNode || prevNode !== upId){
+    window.keys = [];
+    keysLoading = true; // فقط وقتی نود عوض شده است
+  }
   render();
   const banner = $('nodeBanner');
   if (banner){

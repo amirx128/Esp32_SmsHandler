@@ -1620,10 +1620,14 @@ void HtmlFunctions()
             {
     if (!authenticateWeb(req)) { req->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
     String target = "";
+    String targetCompact = "";
     if (req->hasParam("id"))
     {
       target = req->getParam("id")->value();
       target.trim();
+      target.toUpperCase();
+      targetCompact.reserve(target.length());
+      for (char c : target) if (c != ':' && c != '-') targetCompact += c;
     }
     DynamicJsonDocument doc(16384);
     JsonArray keysArr = doc.createNestedArray("keys");
@@ -1631,10 +1635,17 @@ void HtmlFunctions()
     {
       if (target.length())
       {
-        if (!k.id.equalsIgnoreCase(target) &&
-            !k.sid.equalsIgnoreCase(target) &&
-            !k.friendly.equalsIgnoreCase(target))
-          continue;
+        String cid = k.id; cid.toUpperCase();
+        String csid = k.sid; csid.toUpperCase();
+        String cf = k.friendly; cf.toUpperCase();
+        String cNoColonId; cNoColonId.reserve(cid.length());
+        for (char c : cid) if (c != ':' && c != '-') cNoColonId += c;
+        String cNoColonSid; cNoColonSid.reserve(csid.length());
+        for (char c : csid) if (c != ':' && c != '-') cNoColonSid += c;
+        bool match =
+          cid.equalsIgnoreCase(target) || csid.equalsIgnoreCase(target) || cf.equalsIgnoreCase(target) ||
+          (targetCompact.length() && (cNoColonId.equalsIgnoreCase(targetCompact) || cNoColonSid.equalsIgnoreCase(targetCompact)));
+        if (!match) continue;
       }
       JsonObject obj = keysArr.createNestedObject();
       obj["id"] = k.id;

@@ -311,7 +311,8 @@ void handleMeshEvent(const MeshEventInfo &info)
     prefs.putString(dk.key.c_str(), val);
     SetPublicVariablesFromPrefs();
     logf(1, "[MESH] Applied KEY_IDX: %s=%s\n", dk.key.c_str(), val.c_str());
-    sendMeshKeysResponse(6, formatMacFull(info.originMac));
+    // Broadcast full keys (no req filter) so همه نودها نسخه جدید را کش کنند
+    sendMeshKeysResponse(6, "");
     return;
   }
   if (payloadTrim.startsWith("GAS 0"))
@@ -1126,33 +1127,27 @@ void sendMeshKeysResponse(uint8_t ttl, const String &requesterMac)
   // اگر پکت بزرگ شد، برای هر entry جدا بفرست
   if (!boolIdx.empty())
   {
-    const size_t chunkSize = 6;
-    for (size_t start = 0; start < boolIdx.size(); start += chunkSize)
+    DynamicJsonDocument d(192);
+    d["t"] = "boolData";
+    d["r"] = requesterMac;
+    d["src"] = srcMac;
+    JsonObject dd = d.createNestedObject("data");
+    for (size_t i = 0; i < boolIdx.size(); ++i)
     {
-      DynamicJsonDocument d(192);
-      d["t"] = "boolData";
-      d["r"] = requesterMac;
-      d["src"] = srcMac;
-      JsonObject dd = d.createNestedObject("data");
-      size_t end = std::min(start + chunkSize, boolIdx.size());
-      for (size_t i = start; i < end; ++i)
-      {
-        String k = String(boolIdx[i]);
-        dd[k] = bdata[k];
-      }
-      sendDoc(d, "boolData");
-      delay(2);
+      String k = String(boolIdx[i]);
+      dd[k] = bdata[k];
     }
+    sendDoc(d, "boolData");
+    delay(2);
   }
   delay(3);
 
-  // ints: split into up to 3 packets to avoid truncation
+  // ints: split into batches of up to 3 entries per packet
   if (!intItems.empty())
   {
-    size_t chunkCount = intItems.size() < 3 ? intItems.size() : 3;
-    size_t chunkSize = (intItems.size() + chunkCount - 1) / chunkCount;
+    const size_t chunkSize = 3;
     size_t sent = 0;
-    for (size_t c = 0; c < chunkCount && sent < intItems.size(); ++c)
+    while (sent < intItems.size())
     {
       DynamicJsonDocument d(256);
       d["t"] = "intData";
@@ -1172,7 +1167,8 @@ void sendMeshKeysResponse(uint8_t ttl, const String &requesterMac)
   }
   delay(3);
 
-  // strings: each key in its own strData packet
+  // strings: send in small batches to ensure همه شاخص‌ها (از جمله 22،23) ارسال شوند
+  // strings: each key in its own packet
   for (auto &kv : strItems)
   {
     DynamicJsonDocument d(192);

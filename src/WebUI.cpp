@@ -205,6 +205,7 @@ let currentNodeName = null;
 let isEditing = false;
 let lastMeshAutoFetch = 0;
 let keysLoading = false;
+let keysNodeId = null;
 
 function $(id){ return document.getElementById(id); }
 
@@ -433,7 +434,7 @@ async function save(key){
   if (currentNodeId){
     res = await api('/mesh/saveRemote', {nodeId: currentNodeId, key, value: val});
     // refresh remote keys shortly after save
-    keysLoading = true;
+    if (keysNodeId !== currentNodeId.toUpperCase()) keysLoading = true;
     setTimeout(()=>loadMeshKeys(currentNodeId), 800);
   }else{
     res = await api('/save', {key, value: val});
@@ -577,7 +578,7 @@ async function loadMeshState(){
   meshState = data;
   // Always try to refresh keys via lightweight endpoint for current remote node
   if (currentNodeId){
-    keysLoading = true;
+    if (!window.keys || keysNodeId !== currentNodeId.toUpperCase()) keysLoading = true;
     setTimeout(()=>loadMeshKeys(currentNodeId), 300);
   }
    // Update current node name label

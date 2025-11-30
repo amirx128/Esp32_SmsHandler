@@ -1525,7 +1525,7 @@ void HtmlFunctions()
   server.on("/api/mesh/state", HTTP_GET, [](AsyncWebServerRequest *req)
             {
     if (!authenticateWeb(req)) { req->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
-    DynamicJsonDocument doc(32768);
+    DynamicJsonDocument doc(65536);
     static String lastGoodStateJson;
     int stateCount = 0;
     int keyCount = 0;
@@ -1578,7 +1578,8 @@ void HtmlFunctions()
     };
 
     fillFull();
-    if (doc.overflowed())
+    bool docOverflowed = doc.overflowed();
+    if (docOverflowed)
     {
       // اگر باز هم پر شد، نسخه ساده فقط با nodes و خطای overflow بده
       doc.clear();
@@ -1595,7 +1596,7 @@ void HtmlFunctions()
     }
     logf(1, "[API] /mesh/state nodes=%d events=%d states=%d keys=%d overflow=%d len=%u\n",
          nodeCount, eventCount, stateCount, keyCount, doc.overflowed() ? 1 : 0, (unsigned)out.length());
-    if ((stateCount > 0) || (keyCount > 0) || nodeCount > 0)
+    if (!docOverflowed && ((stateCount > 0) || (keyCount > 0) || nodeCount > 0))
     {
       lastGoodStateJson = out;
       req->send(200, "application/json", out);

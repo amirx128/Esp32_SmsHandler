@@ -432,6 +432,9 @@ async function save(key){
   let res;
   if (currentNodeId){
     res = await api('/mesh/saveRemote', {nodeId: currentNodeId, key, value: val});
+    // refresh remote keys shortly after save
+    keysLoading = true;
+    setTimeout(()=>loadMeshKeys(currentNodeId), 800);
   }else{
     res = await api('/save', {key, value: val});
   }
@@ -572,6 +575,11 @@ async function loadMeshState(){
   // Auto mesh fetch disabled; user must click Fetch State for remote nodes
 
   meshState = data;
+  // Always try to refresh keys via lightweight endpoint for current remote node
+  if (currentNodeId){
+    keysLoading = true;
+    setTimeout(()=>loadMeshKeys(currentNodeId), 300);
+  }
    // Update current node name label
   const label = $('nodeNameLabel');
   if (label){

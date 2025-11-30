@@ -206,6 +206,8 @@ let isEditing = false;
 let lastMeshAutoFetch = 0;
 let keysLoading = false;
 let keysNodeId = null;
+let remoteClockBaseMs = null;
+let remoteClockStart = null;
 
 function $(id){ return document.getElementById(id); }
 
@@ -323,6 +325,7 @@ async function afterLogin(preloaded){
   setInterval(loadMem, 12000);
   if (typeof loadGas === 'function') setInterval(loadGas, 4000);
   if (typeof loadDht === 'function') setInterval(loadDht, 4000);
+  setInterval(updateRemoteClockUi, 1000);
 }
 
 function logout(){
@@ -395,6 +398,74 @@ function render(){
     `;
     g.appendChild(div);
   });
+}
+
+function isRemoteSelected(){
+  if (!currentNodeId || !meshState.nodes) return false;
+  const target = currentNodeId.toUpperCase();
+  const me = meshState.nodes.find(n => n.local);
+  if (!me) return true;
+  return target !== (me.id||'').toUpperCase() &&
+         target !== (me.mac||'').toUpperCase() &&
+         target !== (me.friendly||me.id||'').toUpperCase();
+}
+
+function setDisplay(selector, show){
+  document.querySelectorAll(selector).forEach(el => {
+    el.style.display = show ? '' : 'none';
+  });
+}
+
+function updateControlVisibility(){
+  const remote = isRemoteSelected();
+  const hideRemote = [
+    'button[onclick*="syncTime"]',
+    'button[onclick*="sendTestSms"]',
+    'button[onclick*="toggleHelp"]',
+    'button[onclick*="changePass"]',
+    'button[onclick*="factoryReset"]',
+    'button[onclick*="logout"]',
+    'button[onclick*="wifiModal"]',
+    'button[onclick*="smsModal"]',
+    'button[onclick*="inboxModal"]',
+    'button[onclick*="gasModal"]',
+    'button[onclick*="dhtModal"]',
+    'button[onclick*="memModal"]'
+  ];
+  const showAlways = [
+    'button[onclick*="ResetEsp"]',
+    'button[onclick*="nodesModal"]'
+  ];
+  hideRemote.forEach(sel => setDisplay(sel, !remote));
+  showAlways.forEach(sel => setDisplay(sel, true));
+}
+
+function updateRemoteClockBase(){
+  if (!isRemoteSelected()){ remoteClockBaseMs = null; remoteClockStart = null; return; }
+  const target = currentNodeId.toUpperCase();
+  let ts = null;
+  const st = (meshState.states||[]).find(s => (s.id||'').toUpperCase() === target);
+  if (st && st.raw && st.raw.t) ts = st.raw.t;
+  if (!ts){
+    const node = (meshState.nodes||[]).find(n => (n.id||'').toUpperCase() === target || (n.mac||'').toUpperCase() === target);
+    if (node && node.timeMs) ts = node.timeMs;
+  }
+  if (ts){
+    remoteClockBaseMs = ts;
+    remoteClockStart = Date.now();
+  }
+}
+
+function updateRemoteClockUi(){
+  const input = $('deviceTime');
+  if (!input) return;
+  if (remoteClockBaseMs && remoteClockStart){
+    const delta = Date.now() - remoteClockStart;
+    const ts = remoteClockBaseMs + delta;
+    const d = new Date(ts);
+    const iso = new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString().slice(0,19);
+    input.value = iso;
+  }
 }
 
 function populateMeshSettings(keys){
@@ -576,6 +647,8 @@ async function loadMeshState(){
   // Auto mesh fetch disabled; user must click Fetch State for remote nodes
 
   meshState = data;
+  updateControlVisibility();
+  updateRemoteClockBase();
   // Try to refresh keys via lightweight endpoint for current remote node (بدون تغییر وضعیت لودینگ)
   if (currentNodeId){
     setTimeout(()=>loadMeshKeys(currentNodeId), 300);
@@ -735,6 +808,8 @@ async function requestState(nodeId){
     keysLoading = true; // فقط وقتی نود عوض شده است
   }
   render();
+  remoteClockBaseMs = null;
+  remoteClockStart = null;
   const banner = $('nodeBanner');
   if (banner){
     banner.classList.add('remote-active');

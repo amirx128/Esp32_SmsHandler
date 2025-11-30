@@ -39,6 +39,7 @@ void sendMeshKeysResponse(uint8_t ttl = 6, const String &requesterMac = "");
 String validateKey(const String &key, const String &value);
 bool matchesLocalRequester(const String &req);
 extern const int numKeys;
+void StartSoftAP();
 struct ConfigKey
 {
   String key;
@@ -310,6 +311,9 @@ void handleMeshEvent(const MeshEventInfo &info)
     }
     prefs.putString(dk.key.c_str(), val);
     SetPublicVariablesFromPrefs();
+    // اگر SSID یا پسورد تغییر کرد، SoftAP را با تنظیمات جدید بالا بیاور
+    if (dk.key == "wifi_Ssid_Name" || dk.key == "Ssid_Password")
+      StartSoftAP();
     logf(1, "[MESH] Applied KEY_IDX: %s=%s\n", dk.key.c_str(), val.c_str());
     // Broadcast full keys (no req filter) so همه نودها نسخه جدید را کش کنند
     sendMeshKeysResponse(6, "");
@@ -1766,6 +1770,8 @@ void HtmlFunctions()
     }
     prefs.putString(key.c_str(), value);
     SetPublicVariablesFromPrefs();
+    if (key == "wifi_Ssid_Name" || key == "Ssid_Password")
+      StartSoftAP();
     request->send(200, "application/json", "{\"success\":true}"); }));
 
   server.addHandler(new AsyncCallbackJsonWebHandler("/api/changepass", [](AsyncWebServerRequest *request, JsonVariant &json)

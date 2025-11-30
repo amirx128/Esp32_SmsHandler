@@ -40,6 +40,7 @@ String validateKey(const String &key, const String &value);
 bool matchesLocalRequester(const String &req);
 extern const int numKeys;
 void StartSoftAP();
+void restartLocalNodeDelayed(int ms = 200);
 struct ConfigKey
 {
   String key;
@@ -288,6 +289,19 @@ void handleMeshEvent(const MeshEventInfo &info)
     logf(1, "[MESH] KEYS_REQ tgt=%s req=%s match=%d\n", target.c_str(), requester.c_str(), (int)match);
     if (match)
       sendMeshKeysResponse(6, requester);
+    return;
+  }
+  if (typeUpper == "RESET_REQ")
+  {
+    DynamicJsonDocument doc(128);
+    if (deserializeJson(doc, info.payload) != DeserializationError::Ok)
+      return;
+    String target = doc["t"] | doc["target"] | info.payload;
+    if (matchesLocalNode(target))
+    {
+      logf(1, "[MESH] RESET_REQ matched -> restarting...\n");
+      restartLocalNodeDelayed(200);
+    }
     return;
   }
   if (typeUpper == "KEY_IDX")
@@ -1450,9 +1464,24 @@ void HtmlFunctions()
             {
     if (!authenticateWeb(request)) { request->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
     request->send(200, "application/json", "{\"success\":true}");
-    delay(200);
-    ESP.restart();
+    restartLocalNodeDelayed(200);
   });
+
+  server.addHandler(new AsyncCallbackJsonWebHandler("/api/mesh/resetRemote", [](AsyncWebServerRequest *request, JsonVariant &json)
+                                                    {
+    if (!authenticateWeb(request)) { request->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
+    if (!json.is<JsonObject>()) { request->send(400,"application/json","{\"error\":\"invalid json\"}"); return; }
+    String nodeId = json["nodeId"] | "";
+    nodeId.trim();
+    if (!nodeId.length()) { request->send(400,"application/json","{\"error\":\"nodeId required\"}"); return; }
+    DynamicJsonDocument doc(128);
+    doc["t"] = nodeId;
+    doc["req"] = MeshNet_GetLocalMacStr();
+    String payload; serializeJson(doc, payload);
+    logf(1, "[API] resetRemote start nodeId=%s payload=%s\n", nodeId.c_str(), payload.c_str());
+    MeshNet_RecordNetworkEvent("RESET_REQ", payload, false, false, 8, DeviceNowMs());
+    request->send(200, "application/json", "{\"success\":true}");
+    logf(1, "[API] resetRemote done nodeId=%s -> HTTP200\n", nodeId.c_str()); }));
 
   server.on("/api/keys", HTTP_GET, [](AsyncWebServerRequest *req)
             {
@@ -1893,6 +1922,13 @@ void StartSoftAP()
   {
     Serial.println("AP Failed to Start!");
   }
+}
+
+// helper: restart after small delay (to allow HTTP/mesh response to flush)
+void restartLocalNodeDelayed(int ms)
+{
+  delay(ms);
+  ESP.restart();
 }
 
 void applyActuatorsPolicy()

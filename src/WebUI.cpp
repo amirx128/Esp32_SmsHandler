@@ -542,7 +542,11 @@ async function sendTestSms(){
 }
 
 async function ResetEsp(){
-  await api('/ResetEsp', {});
+  if (currentNodeId){
+    await api('/mesh/resetRemote', { nodeId: currentNodeId });
+  }else{
+    await api('/ResetEsp', {});
+  }
 }
 
 async function sendTestSms(){

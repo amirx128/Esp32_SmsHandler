@@ -1,5 +1,7 @@
-﻿#include "MeshlessNetwork.h"
+#include "MeshlessNetwork.h"
+#include "DeviceConfig.h"
 
+#if HANDLE_MESH
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
@@ -1069,3 +1071,25 @@ void MeshNet_SerializeEvents(JsonArray arr)
 
 
 constexpr size_t   kPersistMaxEvents   = 20;   // cap persisted history entries to fit NVS blob
+
+#else
+
+void MeshNet_SetFriendlyName(const String &) {}
+void MeshNet_SetLocalSsid(const String &) {}
+void MeshNet_SetAuth(const String &, const String &) {}
+void MeshNet_UpdateLocalCapabilities(const NodeCapabilities &) {}
+void MeshNet_SetTimeProvider(MeshTimeProvider) {}
+void MeshNet_SetClockSetter(MeshClockSetter) {}
+void MeshNet_Init(MeshEventHandler) {}
+void MeshNet_Tick() {}
+String MeshNet_GetShortMac() { return ""; }
+String MeshNet_GetLocalNodeId() { return ""; }
+uint8_t MeshNet_GetMeshChannel() { return 1; }
+String MeshNet_RecordNetworkEvent(const String &, const String &, bool, bool, uint8_t, uint64_t) { return ""; }
+String MeshNet_GetLocalFriendly() { return ""; }
+String MeshNet_GetLocalMacStr() { return ""; }
+void MeshNet_SerializeNodes(JsonArray arr) { arr.clear(); }
+void MeshNet_SerializeEvents(JsonArray arr) { arr.clear(); }
+
+#endif // HANDLE_MESH
+

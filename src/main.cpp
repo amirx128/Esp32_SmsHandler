@@ -41,6 +41,16 @@ bool matchesLocalRequester(const String &req);
 extern const int numKeys;
 void StartSoftAP();
 void restartLocalNodeDelayed(int ms = 200);
+RTC_DATA_ATTR uint32_t g_bootCount = 0;
+bool g_suppressSetupSms = false;
+// Helper to trace API responses in serial (preview first bytes to avoid flooding)
+inline void logApiResponse(const char *api, const String &payload)
+{
+  size_t len = payload.length();
+  size_t previewLen = len > 180 ? 180 : len;
+  String preview = payload.substring(0, previewLen);
+  logf(1, "[API] %s resp len=%u preview=%s%s\n", api, (unsigned)len, preview.c_str(), len > previewLen ? "..." : "");
+}
 struct ConfigKey
 {
   String key;
@@ -212,6 +222,8 @@ void cacheRemoteState(const MeshEventInfo &info)
 // salam: in handler tamame event haye mesh ro migire va bar asas type ya cache mikone ya response midahad
 void handleMeshEvent(const MeshEventInfo &info)
 {
+  if (!handleMesh)
+    return;
   String macFull = formatMacFull(info.originMac);
   String macShort = formatMacShort(info.originMac);
   String originName = info.originNode.length() ? info.originNode : String("Node_") + macShort;
@@ -551,6 +563,22 @@ SmsState smsState = SMS_IDLE;
 unsigned long lastCommandTime = 0;
 // buffer for send response parsing
 String smsSendRespBuf = "";
+
+// Feed any unsolicited modem chars into the SMS RX state machine so we don't lose messages
+inline void feedSmsRxChar(char c)
+{
+  if (smsRxState == SMS_RX_IDLE)
+  {
+    smsRxBuffer = "";
+    smsRxStart = millis();
+  }
+  if (smsRxState == SMS_RX_WAITING)
+    smsRxState = SMS_RX_READING;
+  if (smsRxState == SMS_RX_IDLE)
+    smsRxState = SMS_RX_READING;
+  smsRxLastReceive = millis();
+  smsRxBuffer += c;
+}
  
 
 // ===================== Web Server / Preferences =====================
@@ -568,7 +596,7 @@ void ApplyClockFromMs(uint64_t timestampMs, bool broadcastMesh)
 
   printTimestampReadable(timestampMs);
 
-  if (broadcastMesh)
+  if (broadcastMesh && handleMesh)
   {
     MeshNet_RecordNetworkEvent("TIME", String(timestampMs), false, false, kTimeSyncTtl, timestampMs);
   }
@@ -609,8 +637,10 @@ ConfigKey defaultKeys[] = {
     {"SmsAlertEnabled",  "                                        ",     "bool",   "true",               "",   "",    "true,false", false},
     {"SmsTxEnabled",     "                  SMS",             "bool",   "true",               "",   "",    "true,false", false},
     {"WifiEnabled",      "                  WiFi (SoftAP)",   "bool",   "true",               "",   "",    "true,false", false},
+#if HANDLE_MESH
     {"mesh_name",        "Mesh Name",                        "string", meshNameDefault,       "3",  "32",  "",            true},
     {"mesh_pass",        "Mesh Password",                    "string", meshPasswordDefault,   "8",  "32",  "",            true},
+#endif
 
     //                   (MQ)
     #if HAS_GAS
@@ -626,7 +656,7 @@ ConfigKey defaultKeys[] = {
     {"HumMin",           "Humidity Min (%)",           "int",    "20",                "0","100", "",            false},
     {"HumMax",           "Humidity Max (%)",           "int",    "80",                "0","100", "",            false},
     #endif
-{"OwnerMobile",      "                   ",                "mobile", "",                   "10", "12",  "",            false},
+    {"OwnerMobile",      "                   ",                "mobile", "09127917347",        "10", "12",  "",            false},
     {"alternetMobile",   "                         ",            "mobile", "",                   "10", "10",  "",            false},
     {"AlternetMobiles",  "                                   (*      )",  "string", "",                   "10", "100", "",            false},
 };
@@ -676,32 +706,21 @@ void cacheRemoteKeys(const MeshEventInfo &info)
   acc["node"] = friendly;
   acc["req"] = req;
   JsonArray keysArr;
+  const char *prevReq = acc["req"] | nullptr;
+  bool reqChanged = (prevReq && acc["req"].is<String>() && String(prevReq) != req);
   bool rebuild = true;
   if (acc.containsKey("keys") && acc["keys"].is<JsonArray>())
   {
     keysArr = acc["keys"].as<JsonArray>();
-    if (keysArr.size() == (size_t)numKeys)
+    if (reqChanged || keysArr.size() > (size_t)numKeys)
+      rebuild = true;
+    else
       rebuild = false;
   }
   if (rebuild)
   {
     acc.remove("keys");
     keysArr = acc.createNestedArray("keys");
-    for (int j = 0; j < numKeys; ++j)
-    {
-      const auto &dk = defaultKeys[j];
-      JsonObject o = keysArr.createNestedObject();
-      o["key"] = dk.key;
-      o["value"] = dk.defaultVal;
-      o["type"] = dk.type;
-      o["min"] = dk.min;
-      o["max"] = dk.max;
-      o["options"] = dk.options;
-      o["isSystem"] = dk.isSystem;
-      o["title"] = dk.title;
-      o["defaultVal"] = dk.defaultVal;
-      o["idx"] = j;
-    }
   }
 
   int p = doc["p"] | -1;
@@ -795,30 +814,21 @@ void cacheRemoteData(const MeshEventInfo &info, const char *kind)
   acc["req"] = req;
 
   JsonArray keysArr;
+  const char *prevReq = acc["req"] | nullptr;
+  bool reqChanged = (prevReq && acc["req"].is<String>() && String(prevReq) != req);
   bool rebuild = true;
   if (acc.containsKey("keys") && acc["keys"].is<JsonArray>())
   {
     keysArr = acc["keys"].as<JsonArray>();
-    if (keysArr.size() == (size_t)numKeys)
+    if (reqChanged || keysArr.size() > (size_t)numKeys)
+      rebuild = true;
+    else
       rebuild = false;
   }
   if (rebuild)
   {
     acc.remove("keys");
     keysArr = acc.createNestedArray("keys");
-    for (int j = 0; j < numKeys; ++j)
-    {
-      const auto &dk = defaultKeys[j];
-      JsonObject o = keysArr.createNestedObject();
-      o["key"] = dk.key;
-      o["value"] = dk.defaultVal;
-      o["type"] = dk.type;
-      o["min"] = dk.min;
-      o["max"] = dk.max;
-      o["options"] = dk.options;
-      o["isSystem"] = dk.isSystem;
-      o["idx"] = j;
-    }
   }
 
   JsonObject data = doc["data"].as<JsonObject>();
@@ -1040,6 +1050,8 @@ bool matchesLocalRequester(const String &req)
 // salam: in func state fa'ali node locale ro be soorate event STATE_RES dar mesh publish mikone
 void sendMeshStateResponse(uint8_t ttl, const String &requesterMac)
 {
+  if (!handleMesh)
+    return;
   DynamicJsonDocument doc(192);
   String shortId = MeshNet_GetLocalNodeId();
   String fullId = formatMacFull(ESP.getEfuseMac());
@@ -1069,6 +1081,8 @@ void sendMeshStateResponse(uint8_t ttl, const String &requesterMac)
 // salam: in func tamame key/value config haye locale ro joda joda (bool/int/str) baraye requester mifereste
 void sendMeshKeysResponse(uint8_t ttl, const String &requesterMac)
 {
+  if (!handleMesh)
+    return;
   String srcMac = formatMacFull(ESP.getEfuseMac());
 
   DynamicJsonDocument bdoc(384);
@@ -1467,6 +1481,83 @@ void HtmlFunctions()
     restartLocalNodeDelayed(200);
   });
 
+  server.on("/api/keys", HTTP_GET, [](AsyncWebServerRequest *req)
+            {
+    logf(1, "[API] /keys start\n");
+    if (!authenticateWeb(req)) { req->send(401); return; }
+    DynamicJsonDocument doc(12288);
+    JsonArray arr = doc.createNestedArray("keys");
+    for (int i = 0; i < numKeys; i++) {
+      JsonObject obj = arr.createNestedObject();
+      obj["key"] = defaultKeys[i].key;
+      obj["title"] = defaultKeys[i].title;
+      obj["type"] = defaultKeys[i].type;
+      obj["value"] = prefs.getString(defaultKeys[i].key.c_str(), defaultKeys[i].defaultVal);
+      obj["min"] = defaultKeys[i].min;
+      obj["max"] = defaultKeys[i].max;
+      obj["options"] = defaultKeys[i].options;
+      obj["isSystem"] = defaultKeys[i].isSystem;
+    }
+    doc["theme"] = prefs.getString("theme", "dark");
+    String out; serializeJson(doc, out);
+    logf(1, "[API] /keys called count=%d\n", numKeys);
+    logApiResponse("/keys", out);
+    req->send(200, "application/json", out); });
+
+  // NEW: INBOX LOG (                                     )
+  server.on("/api/inboxLog", HTTP_GET, [](AsyncWebServerRequest *req)
+            {
+    logf(1, "[API] /inboxLog start\n");
+    if (!authenticateWeb(req)) { req->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
+    uint16_t cnt = g_inboxCount;
+    if (cnt > 120) cnt = 120;
+    DynamicJsonDocument doc(16384);
+    doc["success"] = true;
+    JsonArray items = doc.createNestedArray("items");
+    for (uint16_t i = 0; i < cnt; i++)
+    {
+      int idx = (int)g_inboxHead - 1 - i;
+      if (idx < 0) idx += INBOX_LOG_CAP;
+      JsonObject o = items.createNestedObject();
+      o["id"] = g_inbox[idx].id;
+      o["from"] = g_inbox[idx].from;
+      o["text"] = g_inbox[idx].text;
+      o["timestamp"] = (uint64_t)g_inbox[idx].tsMs;
+    }
+    String out; serializeJson(doc, out);
+    logf(1, "[API] /inboxLog called count=%u\n", (unsigned)cnt);
+    logApiResponse("/inboxLog", out);
+    req->send(200, "application/json", out); });
+
+  // NEW: SMS LOG (                      )
+  server.on("/api/smsLog", HTTP_GET, [](AsyncWebServerRequest *req)
+            {
+    logf(1, "[API] /smsLog start\n");
+    if (!authenticateWeb(req)) { req->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
+    uint16_t cnt = g_smsLogCount;
+    if (cnt > 120) cnt = 120;
+    DynamicJsonDocument doc(20480);
+    doc["success"] = true;
+    JsonArray items = doc.createNestedArray("items");
+    for (uint16_t i = 0; i < cnt; i++)
+    {
+      int idx = (int)g_smsLogHead - 1 - i;
+      if (idx < 0) idx += SMS_LOG_CAP;
+      JsonObject o = items.createNestedObject();
+      o["id"] = g_smsLog[idx].id;
+      o["number"] = g_smsLog[idx].number;
+      o["reason"] = g_smsLog[idx].reason;
+      o["timestamp"] = (uint64_t)g_smsLog[idx].tsMs;
+      o["text"] = g_smsLog[idx].text;
+      o["status"] = g_smsLog[idx].status;
+      o["priority"] = g_smsLog[idx].priority;
+    }
+    String out; serializeJson(doc, out);
+    logf(1, "[API] /smsLog called count=%u\n", (unsigned)cnt);
+    logApiResponse("/smsLog", out);
+    req->send(200, "application/json", out); });
+
+#if  HANDLE_MESH
   server.addHandler(new AsyncCallbackJsonWebHandler("/api/mesh/resetRemote", [](AsyncWebServerRequest *request, JsonVariant &json)
                                                     {
     if (!authenticateWeb(request)) { request->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
@@ -1483,78 +1574,11 @@ void HtmlFunctions()
     request->send(200, "application/json", "{\"success\":true}");
     logf(1, "[API] resetRemote done nodeId=%s -> HTTP200\n", nodeId.c_str()); }));
 
-  server.on("/api/keys", HTTP_GET, [](AsyncWebServerRequest *req)
-            {
-    if (!authenticateWeb(req)) { req->send(401); return; }
-    DynamicJsonDocument doc(4096);
-    JsonArray arr = doc.createNestedArray("keys");
-    for (int i = 0; i < numKeys; i++) {
-      JsonObject obj = arr.createNestedObject();
-      obj["key"] = defaultKeys[i].key;
-      obj["title"] = defaultKeys[i].title;
-      obj["type"] = defaultKeys[i].type;
-      obj["value"] = prefs.getString(defaultKeys[i].key.c_str(), defaultKeys[i].defaultVal);
-      obj["min"] = defaultKeys[i].min;
-      obj["max"] = defaultKeys[i].max;
-      obj["options"] = defaultKeys[i].options;
-      obj["isSystem"] = defaultKeys[i].isSystem;
-    }
-    doc["theme"] = prefs.getString("theme", "dark");
-    String out; serializeJson(doc, out);
-    req->send(200, "application/json", out); });
-
-  // NEW: INBOX LOG (                                     )
-  server.on("/api/inboxLog", HTTP_GET, [](AsyncWebServerRequest *req)
-            {
-    if (!authenticateWeb(req)) { req->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
-    DynamicJsonDocument doc(16384);
-    doc["success"] = true;
-    JsonArray items = doc.createNestedArray("items");
-    uint16_t cnt = g_inboxCount;
-    for (uint16_t i = 0; i < cnt; i++)
-    {
-      int idx = (int)g_inboxHead - 1 - i;
-      if (idx < 0) idx += INBOX_LOG_CAP;
-      JsonObject o = items.createNestedObject();
-      o["id"] = g_inbox[idx].id;
-      o["from"] = g_inbox[idx].from;
-      o["text"] = g_inbox[idx].text;
-      o["timestamp"] = (uint64_t)g_inbox[idx].tsMs;
-    }
-    String out; serializeJson(doc, out);
-    req->send(200, "application/json", out); });
-
-  // NEW: SMS LOG (                      )
-  server.on("/api/smsLog", HTTP_GET, [](AsyncWebServerRequest *req)
-            {
-    if (!authenticateWeb(req)) { req->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
-    DynamicJsonDocument doc(16384);
-    doc["success"] = true;
-    JsonArray items = doc.createNestedArray("items");
-
-    //                                             
-    uint16_t cnt = g_smsLogCount;
-    for (uint16_t i = 0; i < cnt; i++)
-    {
-      int idx = (int)g_smsLogHead - 1 - i;
-      if (idx < 0) idx += SMS_LOG_CAP;
-      JsonObject o = items.createNestedObject();
-      o["id"] = g_smsLog[idx].id;
-      o["number"] = g_smsLog[idx].number;
-      o["reason"] = g_smsLog[idx].reason;
-      o["timestamp"] = (uint64_t)g_smsLog[idx].tsMs; // epoch ms
-      o["text"] = g_smsLog[idx].text;
-      o["status"] = g_smsLog[idx].status;
-      o["priority"] = g_smsLog[idx].priority;
-    }
-    String out; serializeJson(doc, out);
-    req->send(200, "application/json", out); });
-
   // salam: in route list node/event/state/key mesh ro baraye dashboard neshan midahad
   server.on("/api/mesh/state", HTTP_GET, [](AsyncWebServerRequest *req)
             {
     if (!authenticateWeb(req)) { req->send(401,"application/json","{\"error\":\"unauthorized\"}"); return; }
-    DynamicJsonDocument doc(65536);
+    DynamicJsonDocument doc(32768);
     static String lastGoodStateJson;
     int stateCount = 0;
     int keyCount = 0;
@@ -1693,6 +1717,7 @@ void HtmlFunctions()
     doc["success"] = true;
     String out; serializeJson(doc, out);
     req->send(200, "application/json", out); });
+#endif // HANDLE_MESH
 
   server.on("/api/mem", HTTP_GET, [](AsyncWebServerRequest *req)
             {
@@ -1730,6 +1755,7 @@ void HtmlFunctions()
       logf(1, "[API] login failed user=%s\n", user.c_str());
     } }));
 
+#if HANDLE_MESH
   // salam: in endpoint az UI locale yek STATE_REQ be node target mifereste ta state jadid ro bekhunim
   server.addHandler(new AsyncCallbackJsonWebHandler("/api/mesh/requestState", [](AsyncWebServerRequest *request, JsonVariant &json)
                                                     {
@@ -1760,6 +1786,15 @@ void HtmlFunctions()
     doc["req"] = MeshNet_GetLocalMacStr();
     String payload; serializeJson(doc, payload);
     logf(1, "[API] requestKeys start nodeId=%s payload=%s\n", nodeId.c_str(), payload.c_str());
+    // clear cached keys for this node so new response does not mix with old compile-time layout
+    for (auto it = g_remoteKeys.begin(); it != g_remoteKeys.end(); ++it)
+    {
+      if (it->sid.equalsIgnoreCase(nodeId) || it->id.equalsIgnoreCase(nodeId))
+      {
+        g_remoteKeys.erase(it);
+        break;
+      }
+    }
     MeshNet_RecordNetworkEvent("KEYS_REQ", payload, false, false, 8, DeviceNowMs());
     request->send(200, "application/json", "{\"success\":true}");
     logf(1, "[API] requestKeys done nodeId=%s -> HTTP200\n", nodeId.c_str()); }));
@@ -1784,6 +1819,7 @@ void HtmlFunctions()
     logf(1, "[API] saveRemote start nodeId=%s key=%s val=%s payload=%s\n", nodeId.c_str(), key.c_str(), value.c_str(), payload.c_str());
     MeshNet_RecordNetworkEvent("KEY_IDX", payload, false, false, 8, DeviceNowMs());
     request->send(200, "application/json", "{\"success\":true}"); }));
+#endif // HANDLE_MESH
 
   server.addHandler(new AsyncCallbackJsonWebHandler("/api/save", [](AsyncWebServerRequest *request, JsonVariant &json)
                                                     {
@@ -2079,6 +2115,15 @@ bool enqueueSms(String number, String text, int priority)
     return false;
   }
 
+  String trimmedNumber = number;
+  trimmedNumber.trim();
+  if (!trimmedNumber.length())
+  {
+    uint32_t id = smsLogAppend(number, detectReasonFromText(text), deviceNowMs64(), text, "failed", priority);
+    logf(1, "[SMS ] skip send (empty number) id=%lu\n", (unsigned long)id);
+    return false;
+  }
+
   if (priority < 0 || priority > 2)
     return false;
   int head = smsQueueHead[priority];
@@ -2187,7 +2232,7 @@ void processIncomingSmsQueue()
     incomingSmsHead = (incomingSmsHead + 1) % INCOMING_SMS_QUEUE_SIZE;
     String senderNorm = normalizeMobile(msg.sender);
     String ownerNorm = normalizeMobile(public_OwnerMobileNumber);
-    if (senderNorm != ownerNorm)
+    if (senderNorm.length() && senderNorm != ownerNorm)
     {
       enqueueSms(public_OwnerMobileNumber, ReportSmsTextGenerator(msg.sender, msg.text), 0);
     }
@@ -2219,8 +2264,11 @@ bool sendAtWait(const String &cmd, const String &expect, int timeoutMs, String *
   String resp;
   while (millis() - t0 < (uint32_t)timeoutMs)
   {
-    while (SIM808.available())
-      resp += (char)SIM808.read();
+    while (SIM808.available()) {
+      char c = (char)SIM808.read();
+      resp += c;
+      feedSmsRxChar(c); // capture unsolicited SMS during AT waits
+    }
     if (resp.indexOf(expect) != -1)
       break;
     vTaskDelay(1);
@@ -2362,6 +2410,38 @@ String normalizeCommand(const String &in)
   return out;
 }
 
+inline bool hasNumericSender(const String &num)
+{
+  return normalizeMobile(num).length() > 0;
+}
+
+inline void sendOwnerReport(const String &respText, const String &senderNum, int priority)
+{
+  String actor = normalizeMobile(senderNum);
+  if (!actor.length())
+    actor = senderNum;
+  if (!actor.length())
+    actor = String("unknown");
+  if (normalizeMobile(public_OwnerMobileNumber).length())
+    enqueueSms(public_OwnerMobileNumber, String("report: ") + respText + " by " + actor, priority);
+}
+
+inline void replyAndReport(const String &target, const String &respText, int priority, const String &senderNum, bool sendReport = true)
+{
+  enqueueSms(target, respText, priority);
+  if (!sendReport)
+    return;
+
+  String senderNorm = normalizeMobile(senderNum);
+  String ownerNorm = normalizeMobile(public_OwnerMobileNumber);
+
+  // Skip report when sender is owner or sender is not a numeric/mobile id
+  if (!senderNorm.length() || senderNorm == ownerNorm)
+    return;
+
+  sendOwnerReport(respText, senderNum, priority);
+}
+
 String ReportSmsTextGenerator(String senderNumber, String msg)
 {
   return "sender number : " + senderNumber + " ---msg--- " + msg;
@@ -2401,6 +2481,10 @@ bool SenAtCommanSim808(String command, String expectedResponse, int timeout)
       if (line.length() > 0)
       {
         Serial.println("Received line: " + line);
+        // Preserve unsolicited SMS indications that might arrive during blocking AT waits
+        for (size_t i = 0; i < line.length(); ++i)
+          feedSmsRxChar(line[i]);
+        feedSmsRxChar('\n');
         fullResponse += line;
         if (fullResponse.indexOf(expectedResponse) != -1)
         {
@@ -2521,6 +2605,9 @@ void compileSms(String smsText, String num)
     {
       String msg = String("access denied for ") + cmd + " command";
       enqueueSms(num, msg, 0);
+      // Report unauthorized access attempts from numeric senders
+      if (hasNumericSender(num))
+        sendOwnerReport(msg, num, 0);
       Serial.println("    access denied " + num + " cmd=" + cmd);
       return;
     }
@@ -2559,12 +2646,16 @@ void compileSms(String smsText, String num)
     {
       String link = "https://maps.google.com/?q=" + latitude + "," + longitude;
       if (shouldSendThrottled(num, "GPS", 30000))
-        enqueueSms(num, link, 1);
+      {
+        replyAndReport(num, link, 1, num, /*sendReport=*/false);
+      }
     }
     else
     {
       if (shouldSendThrottled(num, "GPSNR", 30000))
-        enqueueSms(num, "GPS not ready", 1);
+      {
+        replyAndReport(num, "GPS not ready", 1, num, /*sendReport=*/false);
+      }
     }
     return;
   }
@@ -2574,7 +2665,9 @@ void compileSms(String smsText, String num)
     public_SystemStatus = 1;
     prefs.putString("SystemEnabled", "true");
     if (shouldSendThrottled(num, "ARM", 15000))
-      enqueueSms(num, "system is arm", 1);
+    {
+      replyAndReport(num, "system is arm", 1, num);
+    }
     return;
   }
   if (smsText == "darm" || smsText == "disarm")
@@ -2582,39 +2675,45 @@ void compileSms(String smsText, String num)
     public_SystemStatus = 0;
     prefs.putString("SystemEnabled", "false");
     if (shouldSendThrottled(num, "DISARM", 15000))
-      enqueueSms(num, "system is disarm", 1);
+    {
+      replyAndReport(num, "system is disarm", 1, num);
+    }
     return;
   }
 
+#if HAS_PIR
   //               
   if (smsText == "piron")
   {
     public_PirEnabled = true;
     prefs.putString("PirEnabled", "true");
-    enqueueSms(num, "pir:on", 2);
+    replyAndReport(num, "pir:on", 2, num);
     return;
   }
   if (smsText == "pirof")
   {
     public_PirEnabled = false;
     prefs.putString("PirEnabled", "false");
-    enqueueSms(num, "pir:off", 2);
+    replyAndReport(num, "pir:off", 2, num);
     return;
   }
+#endif
+#if HAS_VIB
   if (smsText == "vibon")
   {
     public_VibEnabled = true;
     prefs.putString("VibEnabled", "true");
-    enqueueSms(num, "vib:on", 2);
+    replyAndReport(num, "vib:on", 2, num);
     return;
   }
   if (smsText == "vibof")
   {
     public_VibEnabled = false;
     prefs.putString("VibEnabled", "false");
-    enqueueSms(num, "vib:off", 2);
+    replyAndReport(num, "vib:off", 2, num);
     return;
   }
+#endif
 
   //                  
   if (smsText == "ledon")
@@ -2622,7 +2721,7 @@ void compileSms(String smsText, String num)
     public_LedEnabled = true;
     prefs.putString("LedEnabled", "true");
     applyLedPolicy();
-    enqueueSms(num, "led:on", 2);
+    replyAndReport(num, "led:on", 2, num);
     return;
   }
   if (smsText == "ledof")
@@ -2630,7 +2729,7 @@ void compileSms(String smsText, String num)
     public_LedEnabled = false;
     prefs.putString("LedEnabled", "false");
     applyLedPolicy();
-    enqueueSms(num, "led:off", 2);
+    replyAndReport(num, "led:off", 2, num);
     return;
   }
   if (smsText == "buzon")
@@ -2638,7 +2737,7 @@ void compileSms(String smsText, String num)
     public_AlertEnabled_Buzzer = true;
     prefs.putString("BuzzerEnabled", "true");
     applyBuzzerPolicy();
-    enqueueSms(num, "buz:on", 2);
+    replyAndReport(num, "buz:on", 2, num);
     return;
   }
   if (smsText == "buzof")
@@ -2646,7 +2745,7 @@ void compileSms(String smsText, String num)
     public_AlertEnabled_Buzzer = false;
     prefs.putString("BuzzerEnabled", "false");
     applyBuzzerPolicy();
-    enqueueSms(num, "buz:off", 2);
+    replyAndReport(num, "buz:off", 2, num);
     return;
   }
 
@@ -2655,14 +2754,14 @@ void compileSms(String smsText, String num)
   {
     public_AlertEnabled_Sms = true;
     prefs.putString("SmsAlertEnabled", "true");
-    enqueueSms(num, "alerts:on", 2);
+    replyAndReport(num, "alerts:on", 2, num);
     return;
   }
   if (smsText == "alrof")
   {
     public_AlertEnabled_Sms = false;
     prefs.putString("SmsAlertEnabled", "false");
-    enqueueSms(num, "alerts:off", 2);
+    replyAndReport(num, "alerts:off", 2, num);
     return;
   }
 
@@ -2671,7 +2770,7 @@ void compileSms(String smsText, String num)
   {
     public_SmsTxEnabled = true;
     prefs.putString("SmsTxEnabled", "true");
-    enqueueSms(num, "sms:on", 2);
+    replyAndReport(num, "sms:on", 2, num);
     return;
   }
   if (smsText == "smsof")
@@ -2687,7 +2786,7 @@ void compileSms(String smsText, String num)
     public_WifiEnabled = true;
     prefs.putString("WifiEnabled", "true");
     StartSoftAP();
-    enqueueSms(num, "wifi:on", 2);
+    replyAndReport(num, "wifi:on", 2, num);
     return;
   }
   if (smsText == "wifof")
@@ -2695,23 +2794,24 @@ void compileSms(String smsText, String num)
     public_WifiEnabled = false;
     prefs.putString("WifiEnabled", "false");
     stopAP();
-    enqueueSms(num, "wifi:off", 2);
+    replyAndReport(num, "wifi:off", 2, num);
     return;
   }
 
+#if HAS_GAS
   // Gas sensor controls
   if (smsText == "gason")
   {
     public_GasEnabled = true;
     prefs.putString("GasEnabled", "true");
-    enqueueSms(num, "gas:on", 2);
+    replyAndReport(num, "gas:on", 2, num);
     return;
   }
   if (smsText == "gasof")
   {
     public_GasEnabled = false;
     prefs.putString("GasEnabled", "false");
-    enqueueSms(num, "gas:off", 2);
+    replyAndReport(num, "gas:off", 2, num);
     return;
   }
   if (smsText.startsWith("gmin"))
@@ -2721,11 +2821,11 @@ void compileSms(String smsText, String num)
     {
       public_GasMin = v;
       prefs.putString("GasMin", String(v));
-      enqueueSms(num, String("gas:min=") + String(v), 2);
+      replyAndReport(num, String("gas:min=") + String(v), 2, num);
     }
     else
     {
-      enqueueSms(num, "gas:min invalid", 2);
+      replyAndReport(num, "gas:min invalid", 2, num);
     }
     return;
   }
@@ -2736,33 +2836,41 @@ void compileSms(String smsText, String num)
     {
       public_GasMax = v;
       prefs.putString("GasMax", String(v));
-      enqueueSms(num, String("gas:max=") + String(v), 2);
+      replyAndReport(num, String("gas:max=") + String(v), 2, num);
     }
     else
     {
-      enqueueSms(num, "gas:max invalid", 2);
+      replyAndReport(num, "gas:max invalid", 2, num);
     }
     return;
   }
+#endif
 
   if (smsText == "help")
   {
-    String msg =
-        "cmds: gps, arm, darm, piron, pirof, vibon, vibof, "
-        "ledon, ledof, buzon, buzof, alron, alrof, smson, smsof, "
-        "wifon, wifof, check, help, YYYYMMDD:HHmm";
-    enqueueSms(num, msg, 2);
+    String msg = "cmds: gps, arm, darm";
+#if HAS_PIR
+    msg += ", piron, pirof";
+#endif
+#if HAS_VIB
+    msg += ", vibon, vibof";
+#endif
+#if HAS_GAS
+    msg += ", gason, gasof, gmin#, gmax#";
+#endif
+    msg += ", ledon, ledof, buzon, buzof, alron, alrof, smson, smsof, wifon, wifof, check, help, YYYYMMDD:HHmm";
+    replyAndReport(num, msg, 2, num, /*sendReport=*/false);
     return;
   }
   if (smsText == "check")
   {
     String rep = buildCheckReport();
-    enqueueSms(num, rep, 1);
+    replyAndReport(num, rep, 1, num, /*sendReport=*/false);
     return;
   }
 
   //                 
-  enqueueSms(num, "Unknown command: " + smsText, 2);
+  replyAndReport(num, "Unknown command: " + smsText, 2, num, /*sendReport=*/false);
 }
 
 void SetupSim()
@@ -2804,8 +2912,11 @@ void SetupSim()
 
   Serial.println("    SIM808 Initialized Successfully!");
   public_SimIsOnline = true;
-  //                                           +                                 
-  enqueueSms(public_OwnerMobileNumber, String("device setup is down! | ") + buildCheckReport(), 2);
+  // در بوت عادی پیام setup ارسال می‌شود؛ در کرش/واچ‌داگ ارسال نمی‌کنیم
+  if (!g_suppressSetupSms)
+    enqueueSms(public_OwnerMobileNumber, String("device setup is down! | ") + buildCheckReport(), 2);
+  else
+    logf(1, "[BOOT] Suppress setup SMS (crash/restart)\n");
 }
 
 // ===================== Sensors & State Machines =====================
@@ -3281,6 +3392,7 @@ void SmsSender()
     {
       char c = (char)SIM808.read();
       smsSendRespBuf += c;
+      feedSmsRxChar(c); // also feed unsolicited incoming SMS chars
     }
 
     if (smsSendRespBuf.indexOf("ERROR") != -1 || smsSendRespBuf.indexOf("+CMS ERROR") != -1)
@@ -3395,8 +3507,17 @@ void SetPublicVariablesFromPrefs()
   uint64_t mac = ESP.getEfuseMac();
   ssidName = prefs.getString("wifi_Ssid_Name", String("elix_Node_") + formatMacShort(mac));
   ssidPassword = prefs.getString("Ssid_Password", ssidPasswordDefault);
-  meshName = prefs.getString("mesh_name", meshNameDefault);
-  meshPassword = prefs.getString("mesh_pass", meshPasswordDefault);
+  if (handleMesh)
+  {
+    meshName = prefs.getString("mesh_name", meshNameDefault);
+    meshPassword = prefs.getString("mesh_pass", meshPasswordDefault);
+  }
+  else
+  {
+    // Keep defaults locally without touching NVS when mesh is disabled.
+    meshName = meshNameDefault;
+    meshPassword = meshPasswordDefault;
+  }
   deviceName = prefs.getString("deviceName", "");
 
   String trimmedDevice = deviceName;
@@ -3424,9 +3545,12 @@ void SetPublicVariablesFromPrefs()
     ssidPassword = ssidPasswordDefault;
     prefs.putString("Ssid_Password", ssidPassword);
   }
-  MeshNet_SetFriendlyName(deviceName);
-  MeshNet_SetLocalSsid(meshName);
-  MeshNet_SetAuth(meshName, meshPassword);
+  if (handleMesh)
+  {
+    MeshNet_SetFriendlyName(deviceName);
+    MeshNet_SetLocalSsid(meshName);
+    MeshNet_SetAuth(meshName, meshPassword);
+  }
 
   public_SystemStatus = prefs.getString("SystemEnabled", "true") == "true";
   public_PirEnabled = false;
@@ -3466,7 +3590,7 @@ void SetPublicVariablesFromPrefs()
 #endif
 
   public_OwnerMobileNumber = prefs.getString("OwnerMobile", "09127917347");
-  public_AlternetMobile = prefs.getString("alternetMobile", "");
+  public_AlternetMobile = prefs.getString("alternetMobile", "09115203121");
   public_AllAlternetMobiles = prefs.getString("AlternetMobiles", "");
 
   Serial.println("ssidName :  " + ssidName + "    password    :    " + ssidPassword);
@@ -3474,7 +3598,8 @@ void SetPublicVariablesFromPrefs()
   SplitMobiles();
 
   applyActuatorsPolicy();
-  MeshNet_UpdateLocalCapabilities(buildLocalCaps());
+  if (handleMesh)
+    MeshNet_UpdateLocalCapabilities(buildLocalCaps());
 }
 
 // removed stray JS block that broke C++ compilation
@@ -3483,6 +3608,11 @@ void setup()
   Serial.begin(9600);
   setLogEnabled(1); // default: enable serial tracing, can be toggled with 0/1
   Serial.println("Starting ESP32 AP...");
+  g_bootCount++;
+  esp_reset_reason_t rr = esp_reset_reason();
+  bool crashReset = (rr == ESP_RST_PANIC || rr == ESP_RST_INT_WDT || rr == ESP_RST_TASK_WDT || rr == ESP_RST_WDT || rr == ESP_RST_BROWNOUT);
+  g_suppressSetupSms = crashReset;
+  logf(1, "[BOOT] reason=%d crashReset=%d bootCount=%u\n", (int)rr, (int)crashReset, (unsigned)g_bootCount);
 
   prefs.begin("config", false);
   prefs.clear();
@@ -3507,16 +3637,26 @@ void setup()
 
   SetPublicVariablesFromPrefs();
   uint64_t mac = ESP.getEfuseMac();
-  Serial.printf("[MESH] Local node name=%s (me) short=%s mac=%s SSID=%s\n",
-                deviceName.c_str(),
-                formatMacShort(mac).c_str(),
-                formatMacFull(mac).c_str(),
-                ssidName.c_str());
+  if (handleMesh)
+  {
+    Serial.printf("[MESH] Local node name=%s (me) short=%s mac=%s SSID=%s\n",
+                  deviceName.c_str(),
+                  formatMacShort(mac).c_str(),
+                  formatMacFull(mac).c_str(),
+                  ssidName.c_str());
+  }
+  else
+  {
+    Serial.printf("[MESH] Mesh disabled (handleMesh=0). SSID=%s\n", ssidName.c_str());
+  }
   StartSoftAP();
-  MeshNet_Init(handleMeshEvent);
-  MeshNet_SetTimeProvider(DeviceNowMs);
-  MeshNet_SetClockSetter(ApplyClockFromMs);
-  MeshNet_UpdateLocalCapabilities(buildLocalCaps());
+  if (handleMesh)
+  {
+    MeshNet_Init(handleMeshEvent);
+    MeshNet_SetTimeProvider(DeviceNowMs);
+    MeshNet_SetClockSetter(ApplyClockFromMs);
+    MeshNet_UpdateLocalCapabilities(buildLocalCaps());
+  }
   HtmlFunctions();
   SetupSim();
 
@@ -3534,12 +3674,15 @@ void setup()
 void loop()
 {
   UpdateDeviceClockIfNeeded();
-  MeshNet_Tick();
-  static uint32_t lastCapsPush = 0;
-  if ((uint32_t)(millis() - lastCapsPush) > 5000)
+  if (handleMesh)
   {
-    MeshNet_UpdateLocalCapabilities(buildLocalCaps());
-    lastCapsPush = millis();
+    MeshNet_Tick();
+    static uint32_t lastCapsPush = 0;
+    if ((uint32_t)(millis() - lastCapsPush) > 5000)
+    {
+      MeshNet_UpdateLocalCapabilities(buildLocalCaps());
+      lastCapsPush = millis();
+    }
   }
 
   // SMS RX/TX state machines

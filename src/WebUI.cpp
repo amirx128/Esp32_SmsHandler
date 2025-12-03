@@ -1,4 +1,31 @@
 ﻿#include "WebUI.h"
+#include "DeviceConfig.h"
+
+#if HANDLE_MESH
+#define HANDLE_MESH_JS "true"
+#else
+#define HANDLE_MESH_JS "false"
+#endif
+#if HAS_GAS
+#define HAS_GAS_JS "true"
+#else
+#define HAS_GAS_JS "false"
+#endif
+#if HAS_VIB
+#define HAS_VIB_JS "true"
+#else
+#define HAS_VIB_JS "false"
+#endif
+#if HAS_PIR
+#define HAS_PIR_JS "true"
+#else
+#define HAS_PIR_JS "false"
+#endif
+#if HAS_DHT
+#define HAS_DHT_JS "true"
+#else
+#define HAS_DHT_JS "false"
+#endif
 
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
@@ -198,6 +225,16 @@ const char index_html[] PROGMEM = R"rawliteral(
 </div>
 
 <script>
+const HANDLE_MESH = )rawliteral" HANDLE_MESH_JS R"rawliteral(
+;
+const HAS_GAS = )rawliteral" HAS_GAS_JS R"rawliteral(
+;
+const HAS_VIB = )rawliteral" HAS_VIB_JS R"rawliteral(
+;
+const HAS_PIR = )rawliteral" HAS_PIR_JS R"rawliteral(
+;
+const HAS_DHT = )rawliteral" HAS_DHT_JS R"rawliteral(
+;
 let TOKEN = null;
 let meshState = {nodes:[], events:[], states:[]};
 let currentNodeId = null;
@@ -208,8 +245,14 @@ let keysLoading = false;
 let keysNodeId = null;
 let remoteClockBaseMs = null;
 let remoteClockStart = null;
+const MESH_KEYS = ['mesh_name','mesh_pass'];
 
 function $(id){ return document.getElementById(id); }
+
+function filterMeshKeys(arr){
+  if (!arr) return [];
+  return HANDLE_MESH ? [...arr] : arr.filter(k => MESH_KEYS.indexOf(k.key) === -1);
+}
 
 const HELP = [
   {cmd:'help', desc:'Show list of SMS commands'},
@@ -217,7 +260,7 @@ const HELP = [
   {cmd:'alron/alrof', desc:'Enable/disable alarm monitoring'},
   {cmd:'piron/pirof', desc:'Enable/disable PIR sensor'},
   {cmd:'vibon/vibof', desc:'Enable/disable vibration sensor'},
-  {cmd:'gasOn/gasOff', desc:'Enable/disable gas sensor'},
+  {cmd:'gason/gasof', desc:'Enable/disable gas sensor'},
   {cmd:'ledon/ledof', desc:'Enable/disable LED'},
   {cmd:'buzon/buzof', desc:'Enable/disable buzzer'},
   {cmd:'smson/smsof', desc:'Enable/disable SMS alerts'},
@@ -225,11 +268,20 @@ const HELP = [
   {cmd:'YYYYMMDD:HHmm', desc:'Set device date/time (e.g. 14040816:1221)'}
 ];
 
+function filteredHelp(){
+  return HELP.filter(row => {
+    if (!HAS_PIR && row.cmd.indexOf('pir') === 0) return false;
+    if (!HAS_VIB && row.cmd.indexOf('vib') === 0) return false;
+    if (!HAS_GAS && row.cmd.indexOf('gas') === 0) return false;
+    return true;
+  });
+}
+
 function renderHelp(){
   const tb = $('help-tbody');
   if (!tb) return;
   tb.innerHTML = '';
-  HELP.forEach(row => {
+  filteredHelp().forEach(row => {
     const tr = document.createElement('tr');
     tr.innerHTML = `<td class="mono">${row.cmd}</td><td>${row.desc}</td>`;
     tb.appendChild(tr);
@@ -246,6 +298,7 @@ function setDeviceTimeInput(tsMs){
 
 async function api(path, data=null){
   try{
+    console.log('[WEB] api call path=', path, 'data=', data);
     if (!TOKEN) TOKEN = localStorage.getItem('TOKEN');
     const res = await fetch('/api'+path, {
       method: data ? 'POST' : 'GET',
@@ -306,25 +359,26 @@ async function afterLogin(preloaded){
   currentNodeName = null;
 
   if (preloaded && preloaded.keys){
-    window.keys = [];
-    preloaded.keys.forEach(k => window.keys.push(k));
+    window.keys = filterMeshKeys(preloaded.keys);
     populateMeshSettings(window.keys);
     render();
   }else{
     await loadKeys();
   }
+  if (!HANDLE_MESH) applyMeshDisabledUi();
+  applySensorVisibility();
   await loadSmsLog();
   await loadInboxLog();
-  await loadMeshState();
+  if (HANDLE_MESH) await loadMeshState();
   await loadMem();
-  if (typeof loadGas === 'function') await loadGas();
-  if (typeof loadDht === 'function') await loadDht();
+  if (HAS_GAS && typeof loadGas === 'function') await loadGas();
+  if (HAS_DHT && typeof loadDht === 'function') await loadDht();
   setInterval(loadSmsLog, 6000);
   setInterval(loadInboxLog, 8000);
-  setInterval(loadMeshState, 10000);
+  if (HANDLE_MESH) setInterval(loadMeshState, 10000);
   setInterval(loadMem, 12000);
-  if (typeof loadGas === 'function') setInterval(loadGas, 4000);
-  if (typeof loadDht === 'function') setInterval(loadDht, 4000);
+  if (HAS_GAS && typeof loadGas === 'function') setInterval(loadGas, 4000);
+  if (HAS_DHT && typeof loadDht === 'function') setInterval(loadDht, 4000);
   setInterval(updateRemoteClockUi, 1000);
 }
 
@@ -354,8 +408,7 @@ async function autoSyncClock(){
 async function loadKeys(){
   const data = await api('/keys');
   if (data.keys){
-    window.keys = [];
-    data.keys.forEach(k => window.keys.push(k));
+    window.keys = filterMeshKeys(data.keys);
     populateMeshSettings(window.keys);
     render();
     keysLoading = false;
@@ -388,6 +441,7 @@ function render(){
     return;
   }
   window.keys.forEach(k => {
+    if (!HANDLE_MESH && MESH_KEYS.indexOf(k.key) !== -1) return;
     const div = document.createElement('div');
     div.className = 'key-card' + (k.isSystem?' system':'');
     div.innerHTML = `
@@ -401,6 +455,7 @@ function render(){
 }
 
 function isRemoteSelected(){
+  if (!HANDLE_MESH) return false;
   if (!currentNodeId || !meshState.nodes) return false;
   const target = currentNodeId.toUpperCase();
   const me = meshState.nodes.find(n => n.local);
@@ -416,7 +471,35 @@ function setDisplay(selector, show){
   });
 }
 
+function applySensorVisibility(){
+  setDisplay('button[onclick*="gasModal"]', HAS_GAS);
+  setDisplay('button[onclick*="dhtModal"]', HAS_DHT);
+  if (!HAS_GAS){
+    const gas = $('gasModal');
+    if (gas) gas.classList.add('hidden');
+  }
+  if (!HAS_DHT){
+    const dht = $('dhtModal');
+    if (dht) dht.classList.add('hidden');
+  }
+}
+
+function applyMeshDisabledUi(){
+  if (HANDLE_MESH) return;
+  setDisplay('button[onclick*=\"wifiModal\"]', false);
+  setDisplay('button[onclick*=\"nodesModal\"]', false);
+  ['wifiModal','meshModal','nodesModal'].forEach(id => {
+    const el = $(id);
+    if (el) el.classList.add('hidden');
+  });
+}
+
 function updateControlVisibility(){
+  if (!HANDLE_MESH){
+    setDisplay('button[onclick*="wifiModal"]', false);
+    setDisplay('button[onclick*="nodesModal"]', false);
+    return;
+  }
   const remote = isRemoteSelected();
   const hideRemote = [
     'button[onclick*="syncTime"]',
@@ -441,6 +524,7 @@ function updateControlVisibility(){
 }
 
 function updateRemoteClockBase(){
+  if (!HANDLE_MESH){ remoteClockBaseMs = null; remoteClockStart = null; return; }
   if (!isRemoteSelected()){ remoteClockBaseMs = null; remoteClockStart = null; return; }
   const target = currentNodeId.toUpperCase();
   let ts = null;
@@ -469,6 +553,7 @@ function updateRemoteClockUi(){
 }
 
 function populateMeshSettings(keys){
+  if (!HANDLE_MESH) return;
   const ssidKey = keys.find(k => k.key === 'mesh_name');
   const passKey = keys.find(k => k.key === 'mesh_pass');
   const ssidInput = $('meshSsid');
@@ -478,6 +563,7 @@ function populateMeshSettings(keys){
 }
 
 async function saveMeshWifi(){
+  if (!HANDLE_MESH) return;
   const msgEl = $('meshMsg');
   if (msgEl) msgEl.textContent = '';
   const ssidEl = $('meshSsid');
@@ -493,6 +579,7 @@ async function saveMeshWifi(){
 }
 
 function toggleMeshPass(){
+  if (!HANDLE_MESH) return;
   const inp = $('meshPass');
   if (!inp) return;
   const show = $('meshPassShow') && $('meshPassShow').checked;
@@ -542,7 +629,7 @@ async function sendTestSms(){
 }
 
 async function ResetEsp(){
-  if (currentNodeId){
+  if (HANDLE_MESH && currentNodeId){
     await api('/mesh/resetRemote', { nodeId: currentNodeId });
   }else{
     await api('/ResetEsp', {});
@@ -627,6 +714,7 @@ async function loadMem(){
 }
 
 async function loadGas(){
+  if (!HAS_GAS) return;
   const data = await api('/gas');
   if (!data || !data.success) return;
   if ($('gasVal')) $('gasVal').textContent = data.value;
@@ -634,6 +722,7 @@ async function loadGas(){
 }
 
 async function loadDht(){
+  if (!HAS_DHT) return;
   const data = await api('/dht');
   if (!data || !data.success) return;
   if ($('dhtTemp')) $('dhtTemp').textContent = data.t;
@@ -642,6 +731,7 @@ async function loadDht(){
 }
 
 async function loadMeshState(){
+  if (!HANDLE_MESH) return;
   console.log('[WEB] loadMeshState start');
   const data = await api('/mesh/state');
   if (!data || !data.nodes){ console.warn('[WEB] loadMeshState empty/invalid', data); return; }
@@ -698,13 +788,11 @@ async function loadMeshState(){
         ))
       );
       if (rk && rk.raw && rk.raw.keys){
-        window.keys = [];
-        rk.raw.keys.forEach(k => window.keys.push(k));
+        window.keys = filterMeshKeys(rk.raw.keys);
         applied = true;
       }
       else if (rk && rk.raw && rk.raw.p === 0 && rk.raw.total){ // partial page arrived
-        window.keys = [];
-        if (rk.raw.keys) rk.raw.keys.forEach(k => window.keys.push(k));
+        window.keys = filterMeshKeys(rk.raw.keys || []);
         applied = true;
       }
     }
@@ -749,6 +837,7 @@ async function loadMeshState(){
 }
 
 async function loadMeshKeys(nodeId){
+  if (!HANDLE_MESH) return;
   try{
     const qs = nodeId ? (`?id=${encodeURIComponent(nodeId)}`) : '';
     const data = await api('/mesh/keys' + qs);
@@ -759,8 +848,7 @@ async function loadMeshKeys(nodeId){
         nodeId.toUpperCase() === (k.friendly||'').toUpperCase()
       ) : data.keys[0];
       if (rk && rk.raw && rk.raw.keys){
-        window.keys = [];
-        rk.raw.keys.forEach(k => window.keys.push(k));
+        window.keys = filterMeshKeys(rk.raw.keys);
         keysNodeId = nodeId ? nodeId.toUpperCase() : null;
       }
     }
@@ -773,6 +861,7 @@ async function loadMeshKeys(nodeId){
 }
 
 function openMeshModal(nodeId){
+  if (!HANDLE_MESH) return;
   closeModal('nodesModal'); // ensure only one modal visible
   const modal = $('meshModal');
   if (!modal) return;
@@ -802,6 +891,7 @@ function openMeshModal(nodeId){
 }
 
 async function requestState(nodeId){
+  if (!HANDLE_MESH) return;
   currentNodeId = nodeId;
   currentNodeName = nodeId;
   closeModal('nodesModal');
@@ -831,11 +921,14 @@ async function requestState(nodeId){
 function closeMeshModal(){ closeModal('meshModal'); }
 
 function openModal(id){
+  if (!HANDLE_MESH && (id === 'wifiModal' || id === 'nodesModal' || id === 'meshModal')) return;
+  if (!HAS_GAS && id === 'gasModal') return;
+  if (!HAS_DHT && id === 'dhtModal') return;
   const el = $(id);
   if (!el) return;
   el.classList.remove('hidden');
-  if (id === 'gasModal' && typeof loadGas === 'function') loadGas();
-  if (id === 'dhtModal' && typeof loadDht === 'function') loadDht();
+  if (id === 'gasModal' && HAS_GAS && typeof loadGas === 'function') loadGas();
+  if (id === 'dhtModal' && HAS_DHT && typeof loadDht === 'function') loadDht();
   if (id === 'nodesModal'){ console.log('[WEB] nodesModal open -> fetch mesh state'); loadMeshState && loadMeshState(); }
   if (id === 'smsModal') loadSmsLog && loadSmsLog();
   if (id === 'inboxModal') loadInboxLog && loadInboxLog();
